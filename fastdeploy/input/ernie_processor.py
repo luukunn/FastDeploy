@@ -114,6 +114,7 @@ class ErnieProcessor(BaseDataProcessor):
         if len(request.prompt_token_ids) == 0:
             raise ValueError("Invalid input: prompt_token_ids must be a non-empty sequence of token IDs")
 <<<<<<< HEAD
+<<<<<<< HEAD
         if max_model_len is not None and len(
                 request.prompt_token_ids) > max_model_len:
             request.prompt_token_ids = request.prompt_token_ids[:
@@ -123,6 +124,10 @@ class ErnieProcessor(BaseDataProcessor):
         if max_model_len is not None and len(request.prompt_token_ids) > max_model_len:
             request.prompt_token_ids = request.prompt_token_ids[: max_model_len - 1]
 >>>>>>> upstream/develop
+=======
+        if max_model_len is not None and len(request.prompt_token_ids) > max_model_len:
+            request.prompt_token_ids = request.prompt_token_ids[: max_model_len - 1]
+>>>>>>> b8b41334be35b7f552a9d80d066b4269426e7525
         if request.get("max_tokens") is None:
             request.set(
                 "max_tokens",

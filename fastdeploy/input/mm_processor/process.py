@@ -33,11 +33,14 @@ from .image_preprocessor.image_preprocessor_adaptive import AdaptiveImageProcess
 from .process_video import read_frames_decord, read_video_decord
 from .utils.render_timestamp import render_frame_timestamp
 <<<<<<< HEAD
+<<<<<<< HEAD
 from fastdeploy.input.ernie_tokenizer import ErnieBotTokenizer
 from fastdeploy.entrypoints.chat_utils import parse_chat_messages
 from fastdeploy.utils import data_processor_logger
 =======
 >>>>>>> upstream/develop
+=======
+>>>>>>> b8b41334be35b7f552a9d80d066b4269426e7525
 
 IDS_TYPE_FLAG = {"text": 0, "image": 1, "video": 2, "audio": 3}
 
@@ -516,6 +519,9 @@ class DataProcessor:
             f"req_id:{request.get('request_id', ''),} tokens: {tokens}, token_ids: {token_ids}")
 <<<<<<< HEAD
         return token_ids
+<<<<<<< HEAD
 =======
         return token_ids
 >>>>>>> upstream/develop
+=======
+>>>>>>> b8b41334be35b7f552a9d80d066b4269426e7525
