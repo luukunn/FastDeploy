@@ -107,7 +107,7 @@ class ErnieToolParser(ToolParser):
             return ret
 
         except Exception:
-            logger.exception("Error in extracting tool call from response.")
+            data_processor_logger.error("Error in extracting tool call from response.")
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -158,7 +158,7 @@ class ErnieToolParser(ToolParser):
                         obj["arguments"] = obj["parameters"]
                     tool_call_arr.append(obj)
             except partial_json_parser.core.exceptions.MalformedJSON:
-                logger.debug('not enough tokens to parse into JSON yet')
+                data_processor_logger.debug('not enough tokens to parse into JSON yet')
                 return None
 
             # select as the current tool call the one we're on the state at
@@ -188,7 +188,7 @@ class ErnieToolParser(ToolParser):
                             self.streamed_args_for_tool[self.current_tool_id])
                         argument_diff = cur_args_json[sent:]
 
-                        logger.debug("got arguments diff: %s", argument_diff)
+                        data_processor_logger.debug("got arguments diff: %s", argument_diff)
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
@@ -205,7 +205,7 @@ class ErnieToolParser(ToolParser):
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
-                logger.debug("starting on new tool %d", self.current_tool_id)
+                data_processor_logger.debug("starting on new tool %d", self.current_tool_id)
                 return delta
 
             # if the current tool name hasn't been sent, send if available
@@ -266,8 +266,8 @@ class ErnieToolParser(ToolParser):
             return delta
 
         except Exception:
-            logger.exception("Error trying to handle streaming tool call.")
-            logger.debug(
+            data_processor_logger.error("Error trying to handle streaming tool call.")
+            data_processor_logger.debug(
                 "Skipping chunk as a result of tool streaming extraction "
                 "error")
             return None
