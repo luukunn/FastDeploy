@@ -54,8 +54,10 @@ class OpenAIServingChat:
         self.pid = pid
         self.master_ip = dist_init_ip
         self.host_ip = get_host_ip()
-        self.tool_parser = ToolParserManager.get_tool_parser(
-                    tool_parser)
+        self.tool_parser = None
+        if tool_parser:
+            self.tool_parser = ToolParserManager.get_tool_parser(
+                        tool_parser)
 
 
     def _check_master(self):
@@ -391,13 +393,14 @@ class OpenAIServingChat:
                     break
         finally:
             dealer.close()
-
-        tool_parser = self.tool_parser(self.engine_client.data_processor.tokenizer)
-        tool_call_info = tool_parser.extract_tool_calls(
-                    final_res["outputs"]["text"], request=request)
+            
         tool_calls = None
-        if tool_call_info.tools_called:
-            tool_calls = tool_call_info.tool_calls
+        if self.tool_parser:
+            tool_parser = self.tool_parser(self.engine_client.data_processor.tokenizer)
+            tool_call_info = tool_parser.extract_tool_calls(
+                        final_res["outputs"]["text"], request=request)
+            if tool_call_info.tools_called:
+                tool_calls = tool_call_info.tool_calls
 
         choices = []
         output = final_res["outputs"]
