@@ -243,7 +243,7 @@ class OpenAIServingChat:
                     tool_delta_message = output["tool_delta_message"]
                     if tool_delta_message is None:
                         continue
-                    elif tool_delta_message and tool_delta_message["content"] != None:
+                    elif tool_delta_message and tool_delta_message.content != None:
                         delta_message = DeltaMessage(
                             content=delta_text, 
                             reasoning_content=output.get("reasoning_content"), \
