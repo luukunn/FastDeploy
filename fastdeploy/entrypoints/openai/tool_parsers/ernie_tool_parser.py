@@ -22,7 +22,6 @@ from typing import Union
 import partial_json_parser
 import regex as re
 from partial_json_parser.core.options import Allow
-from transformers import PreTrainedTokenizerBase
 
 from fastdeploy.entrypoints.chat_utils import random_tool_call_id
 from fastdeploy.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -48,7 +47,7 @@ class ErnieToolParser(ToolParser):
     are all set
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
+    def __init__(self, tokenizer):
         super().__init__(tokenizer)
 
         # initialize properties used for state when parsing tool calls in
