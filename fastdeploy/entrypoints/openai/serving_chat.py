@@ -41,6 +41,7 @@ from fastdeploy.entrypoints.openai.protocol import (
 from fastdeploy.metrics.work_metrics import work_process_metrics
 from fastdeploy.utils import api_server_logger, get_host_ip
 from fastdeploy.worker.output import LogprobsLists
+from fastdeploy.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 
 
 class OpenAIServingChat:
@@ -48,11 +49,14 @@ class OpenAIServingChat:
     OpenAI-style chat completions serving
     """
 
-    def __init__(self, engine_client, pid, dist_init_ip):
+    def __init__(self, engine_client, pid, dist_init_ip, tool_parser):
         self.engine_client = engine_client
         self.pid = pid
         self.master_ip = dist_init_ip
         self.host_ip = get_host_ip()
+        self.tool_parser = ToolParserManager.get_tool_parser(
+                    tool_parser)
+
 
     def _check_master(self):
         if self.master_ip is None:
@@ -388,13 +392,20 @@ class OpenAIServingChat:
         finally:
             dealer.close()
 
+        tool_parser = self.tool_parser(self.engine_client.data_processor.tokenizer)
+        tool_call_info = tool_parser.extract_tool_calls(
+                    final_res["outputs"]["text"], request=request)
+        tool_calls = None
+        if tool_call_info.tools_called:
+            tool_calls = tool_call_info.tool_calls
+
         choices = []
         output = final_res["outputs"]
         message = ChatMessage(
             role="assistant",
             content=output["text"],
             reasoning_content=output.get("reasoning_content"),
-            tool_calls=output.get("tool_call_content"),
+            tool_calls=tool_calls,
             prompt_token_ids=prompt_token_ids if enable_return_token_ids else None,
             completion_token_ids=completion_token_ids if enable_return_token_ids else None,
         )

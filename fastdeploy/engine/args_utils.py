@@ -397,6 +397,13 @@ class EngineArgs:
             "reasoning content from the model output",
         )
         model_group.add_argument(
+            "--tool-call-parser",
+            type=str,
+            default=EngineArgs.reasoning_parser,
+            help="Flag specifies the tool call parser to use for extracting "
+            "tool call from the model output",
+        )
+        model_group.add_argument(
             "--speculative-config",
             type=json.loads,
             default=EngineArgs.speculative_config,
