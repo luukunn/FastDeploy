@@ -86,6 +86,10 @@ class EngineArgs:
     """
     specifies the reasoning parser to use for extracting reasoning content from the model output
     """
+    tool_call_parser: str = None
+    """
+    specifies the tool call parser  to use for extracting tool call from the model output
+    """
     enable_mm: bool = False
     """
     Flags to enable multi-modal model
