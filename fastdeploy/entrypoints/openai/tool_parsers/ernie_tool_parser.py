@@ -144,13 +144,12 @@ class ErnieToolParser(ToolParser):
                 start_idx = len(self.bot_token) if current_text.startswith(
                     self.bot_token) else 0
                 while start_idx < len(current_text):
-                    (obj,
-                     end_idx) = partial_json_loads(current_text[start_idx:],
+                    (obj,end_idx) = partial_json_loads(current_text[start_idx:],
                                                    flags)
                     is_complete.append(
                         is_complete_json(current_text[start_idx:start_idx +
                                                       end_idx]))
-                    start_idx += end_idx + len('; ')
+                    start_idx += end_idx + len(',')
                     # depending on the prompt Llama can use
                     # either arguments or parameters
                     if "parameters" in obj:
@@ -165,7 +164,6 @@ class ErnieToolParser(ToolParser):
             # select as the current tool call the one we're on the state at
             current_tool_call: dict = tool_call_arr[self.current_tool_id] \
                 if len(tool_call_arr) > 0 else {}
-
             # case -- if no tokens have been streamed for the tool, e.g.
             #   only the array brackets, stream nothing
             if len(tool_call_arr) == 0:
@@ -190,12 +188,15 @@ class ErnieToolParser(ToolParser):
                         argument_diff = cur_args_json[sent:]
 
                         data_processor_logger.debug("got arguments diff: %s", argument_diff)
-                        delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
-                        ])
+                        if argument_diff:
+                            delta = DeltaMessage(tool_calls=[
+                                DeltaToolCall(index=self.current_tool_id,
+                                            function=DeltaFunctionCall(
+                                                arguments=argument_diff).
+                                            model_dump(exclude_none=True))
+                            ])
+                        else:
+                            delta = None
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
                     else:
@@ -214,7 +215,6 @@ class ErnieToolParser(ToolParser):
             elif not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
-
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
@@ -253,7 +253,7 @@ class ErnieToolParser(ToolParser):
                                 prev_args_json, cur_args_json)
                             argument_diff = prefix[sent:]
 
-                    if argument_diff is not None:
+                    if argument_diff:
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(

@@ -17,9 +17,9 @@
 from copy import deepcopy
 from typing import List, Literal, Union
 from urllib.parse import urlparse
-from uuid import uuid4
 
 import requests
+import uuid
 from openai.types.chat import (
     ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam,
 )
