@@ -22,19 +22,20 @@ from typing import Union
 import partial_json_parser
 import regex as re
 from partial_json_parser.core.options import Allow
-from fastdeploy.utils import data_processor_logger
+from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.chat_utils import random_tool_call_id
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+from fastdeploy.entrypoints.chat_utils import random_tool_call_id
+from fastdeploy.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from fastdeploy.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.entrypoints.openai.tool_parsers.utils import (find_common_prefix,
+from fastdeploy.entrypoints.openai.tool_parsers.utils import (find_common_prefix,
                                                         is_complete_json,
                                                         partial_json_loads)
+from fastdeploy.utils import data_processor_logger
 
 
 @ToolParserManager.register_module("ernie")
@@ -43,11 +44,11 @@ class ErnieToolParser(ToolParser):
     Tool call parser for Llama 3.1 models intended for use with the
     examples/tool_chat_template_llama.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser ernie 
+    Used when --enable-auto-tool-choice --tool-call-parser llama3_json 
     are all set
     """
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
 
         # initialize properties used for state when parsing tool calls in
@@ -55,7 +56,9 @@ class ErnieToolParser(ToolParser):
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.streamed_args_for_tool: list[str] = []  # map what has been streamed for each tool so far to a list
+        self.streamed_args_for_tool: list[str] = [
+        ]  # map what has been streamed for each tool so far to a list
+        self.bot_token = "<mask:8>["
 
     def extract_tool_calls(
             self, model_output: str,
@@ -64,7 +67,8 @@ class ErnieToolParser(ToolParser):
         Extract the tool calls from a complete model response.
         """
         # case -- if a tool call token is not present, return a text response
-        if not model_output.startswith('{'):
+        if not (model_output.startswith(self.bot_token)
+                or model_output.startswith('{')):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
@@ -75,10 +79,13 @@ class ErnieToolParser(ToolParser):
             dec = JSONDecoder()
             function_call_arr = []
 
-            start_idx = 0
+            # depending on the prompt format the Llama model may or may not
+            # prefix the output with the <|python_tag|> token
+            start_idx = len(self.bot_token) if model_output.startswith(
+                self.bot_token) else 0
             while start_idx < len(model_output):
                 (obj, end_idx) = dec.raw_decode(model_output[start_idx:])
-                start_idx += end_idx + len(',')
+                start_idx += end_idx + len('; ')
                 function_call_arr.append(obj)
 
             tool_calls: list[ToolCall] = [
@@ -101,7 +108,7 @@ class ErnieToolParser(ToolParser):
             return ret
 
         except Exception:
-            data_processor_logger.error("Error in extracting tool call from response.")
+            logger.exception("Error in extracting tool call from response.")
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -118,7 +125,8 @@ class ErnieToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
-        if current_text.startswith('{'):
+        if not (current_text.startswith(self.bot_token)
+                or current_text.startswith('{')):
             return DeltaMessage(content=delta_text)
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
@@ -131,9 +139,14 @@ class ErnieToolParser(ToolParser):
             tool_call_arr = []
             is_complete = []
             try:
-                start_idx = 0
+                # depending on the prompt format the Llama model may or may not
+                # prefix the output with the <|python_tag|> token
+                start_idx = len(self.bot_token) if current_text.startswith(
+                    self.bot_token) else 0
                 while start_idx < len(current_text):
-                    (obj, end_idx) = partial_json_loads(current_text[start_idx:], flags)
+                    (obj,
+                     end_idx) = partial_json_loads(current_text[start_idx:],
+                                                   flags)
                     is_complete.append(
                         is_complete_json(current_text[start_idx:start_idx +
                                                       end_idx]))
