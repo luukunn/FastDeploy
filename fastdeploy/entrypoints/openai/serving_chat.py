@@ -143,7 +143,7 @@ class OpenAIServingChat:
             model=model_name,
         )
         tool_parser = None
-        if self.tool_parser and enable_auto_tools:
+        if self.tool_parser:
             tool_parser = self.tool_parser(self.engine_client.data_processor.tokenizer)
         try:
             dealer = await aiozmq.create_zmq_stream(zmq.DEALER, connect=f"ipc:///dev/shm/router_{self.pid}.ipc")
