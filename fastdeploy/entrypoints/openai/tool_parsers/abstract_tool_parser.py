@@ -22,7 +22,7 @@ from typing import Callable, Optional, Union
 from fastdeploy.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation)
-from vllm.utils import import_from_path, is_list_of
+from fastdeploy.utils import is_list_of
 
 
 
@@ -157,18 +157,3 @@ class ToolParserManager:
             return module
 
         return _register
-
-    @classmethod
-    def import_tool_parser(cls, plugin_path: str) -> None:
-        """
-        Import a user-defined tool parser by the path of the tool parser define
-        file.
-        """
-        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
-
-        try:
-            import_from_path(module_name, plugin_path)
-        except Exception:
-            logger.exception("Failed to load module '%s' from %s.",
-                             module_name, plugin_path)
-            return
