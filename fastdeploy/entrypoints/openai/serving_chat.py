@@ -49,13 +49,12 @@ class OpenAIServingChat:
     OpenAI-style chat completions serving
     """
 
-    def __init__(self, engine_client, pid, dist_init_ip, tool_parser, enable_auto_tools):
+    def __init__(self, engine_client, pid, dist_init_ip, tool_parser):
         self.engine_client = engine_client
         self.pid = pid
         self.master_ip = dist_init_ip
         self.host_ip = get_host_ip()
         self.tool_parser = None
-        self.enable_auto_tools = enable_auto_tool_choice
         if tool_parser:
             self.tool_parser = ToolParserManager.get_tool_parser(
                         tool_parser)
@@ -349,7 +348,7 @@ class OpenAIServingChat:
             logprob_contents = []
             completion_token_ids = []
             tool_parser = None
-            if self.tool_parser and self.enable_auto_tools:
+            if self.tool_parser:
                 tool_parser = self.tool_parser(self.engine_client.data_processor.tokenizer)
             while True:
                 try:
