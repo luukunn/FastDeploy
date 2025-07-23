@@ -72,7 +72,6 @@ class ToolCall(BaseModel):
     id: str = None
     type: Literal["function"] = "function"
     function: FunctionCall
-    index: int
 
 
 class DeltaFunctionCall(BaseModel):

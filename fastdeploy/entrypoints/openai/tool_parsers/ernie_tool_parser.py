@@ -84,7 +84,7 @@ class ErnieToolParser(ToolParser):
                 self.bot_token) else 0
             while start_idx < len(model_output):
                 (obj, end_idx) = dec.raw_decode(model_output[start_idx:])
-                start_idx += end_idx + len('; ')
+                start_idx += end_idx + len(',')
                 function_call_arr.append(obj)
 
             tool_calls: list[ToolCall] = [
