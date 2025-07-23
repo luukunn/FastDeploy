@@ -296,7 +296,7 @@ class ErnieProcessor(BaseDataProcessor):
         if is_end:
             data_processor_logger.info(f"req_id:{req_id}, decode_status: {self.decode_status[req_id]}")
             del self.decode_status[req_id]
-        response_dict["tool_delta_message"] = False
+        response_dict["outputs"]["tool_delta_message"] = False
         if tool_parser:
             tool_call = tool_parser.extract_tool_calls_streaming(
                 previous_texts,
@@ -307,7 +307,7 @@ class ErnieProcessor(BaseDataProcessor):
                 token_ids,
                 response_dict
             )
-            response_dict["tool_delta_message"] = tool_call
+            response_dict["outputs"]["tool_delta_message"] = tool_call
         return response_dict
 
     def messages2ids(self, request_or_messages):
