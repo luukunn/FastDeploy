@@ -236,6 +236,7 @@ class ErnieProcessor(BaseDataProcessor):
             Dict: response contain text fields
         """
         enable_thinking = kwargs.get("enable_thinking")
+        tool_parser = kwargs.get("tool_parser")
         token_ids = response_dict["outputs"]["token_ids"]
         is_end = response_dict["finished"]
         req_id = response_dict["request_id"]
@@ -254,6 +255,9 @@ class ErnieProcessor(BaseDataProcessor):
                 response_dict["outputs"]["text"] = full_text
             data_processor_logger.info(f"req_id:{req_id}, decode_status: {self.decode_status[req_id]}")
             del self.decode_status[req_id]
+            if tool_parser:
+                response_dict["tool_call_info"] = tool_parser.extract_tool_calls(
+                    full_text, response_dict)
         return response_dict
 
     def process_response_dict_streaming(self, response_dict, **kwargs):
@@ -270,6 +274,7 @@ class ErnieProcessor(BaseDataProcessor):
         is_end = response_dict["finished"]
         req_id = response_dict["request_id"]
         token_ids = response_dict["outputs"]["token_ids"]
+        tool_parser = kwargs.get("tool_parser")
 
         if is_end and len(token_ids) > 0 and not kwargs.get("include_stop_str_in_output"):
             if token_ids[-1] == self.tokenizer.eos_token_id:
@@ -291,6 +296,17 @@ class ErnieProcessor(BaseDataProcessor):
         if is_end:
             data_processor_logger.info(f"req_id:{req_id}, decode_status: {self.decode_status[req_id]}")
             del self.decode_status[req_id]
+        response_dict["tool_delta_message"] = False
+        if tool_parser:
+            tool_call = tool_parser.extract_tool_calls_streaming(
+                previous_texts,
+                previous_texts + delta_text,
+                delta_text,
+                previous_token_ids,
+                previous_token_ids + token_ids,
+                token_ids,
+            )
+            response_dict["tool_delta_message"] = tool_call
         return response_dict
 
     def messages2ids(self, request_or_messages):
