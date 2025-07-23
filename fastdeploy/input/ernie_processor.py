@@ -305,6 +305,7 @@ class ErnieProcessor(BaseDataProcessor):
                 previous_token_ids,
                 previous_token_ids + token_ids,
                 token_ids,
+                response_dict
             )
             response_dict["tool_delta_message"] = tool_call
         return response_dict
