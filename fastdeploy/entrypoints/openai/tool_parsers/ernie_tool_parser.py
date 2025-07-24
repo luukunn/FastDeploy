@@ -120,9 +120,9 @@ class ErnieToolParser(ToolParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
+        request: dict,
     ) -> Union[DeltaMessage, None]:
-        if request["finished"] and delta_text == "]":
+        if request.get("finished", False) and delta_text == "]":
             return None
 
         if len(current_text.strip()) == 0 or (len(current_text.strip()) == 1 and current_text) == '[':
