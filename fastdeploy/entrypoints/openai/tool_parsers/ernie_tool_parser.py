@@ -57,7 +57,6 @@ class ErnieToolParser(ToolParser):
         self.current_tool_name_sent: bool = False
         self.streamed_args_for_tool: list[str] = [
         ]  # map what has been streamed for each tool so far to a list
-        self.bot_token = "<mask:8>["
 
     def extract_tool_calls(
             self, model_output: str,
@@ -66,9 +65,11 @@ class ErnieToolParser(ToolParser):
         Extract the tool calls from a complete model response.
         """
         # case -- if a tool call token is not present, return a text response
-        model_output = model_output.replace('<mask:8>[', '').replace(']<mask:9>', '')
-        if not (model_output.startswith(self.bot_token)
-                or model_output.startswith('{')):
+        model_output = model_output.replace('<mask:8>[', '').replace(']<mask:9>', '').replace("[", "").replace("]", "")
+        print("="*50)
+        print(model_output)
+        print("="*50)
+        if not model_output.startswith('{'):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
@@ -81,8 +82,7 @@ class ErnieToolParser(ToolParser):
 
             # depending on the prompt format the Llama model may or may not
             # prefix the output with the <|python_tag|> token
-            start_idx = len(self.bot_token) if model_output.startswith(
-                self.bot_token) else 0
+            start_idx = 0
             while start_idx < len(model_output):
                 (obj, end_idx) = dec.raw_decode(model_output[start_idx:])
                 start_idx += end_idx + len(',')
@@ -104,7 +104,7 @@ class ErnieToolParser(ToolParser):
             # get any content before  the tool call
             ret = ExtractedToolCallInformation(tools_called=True,
                                                tool_calls=tool_calls,
-                                               content=None)
+                                               content="")
             return ret
 
         except Exception:

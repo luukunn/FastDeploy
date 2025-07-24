@@ -418,6 +418,7 @@ class OpenAIServingChat:
             "completion_token_ids": completion_token_ids if enable_return_token_ids else None,
         }
         tool_call_info = output.get("tool_call_info", None)
+        print(tool_call_info)
         if tool_call_info and tool_call_info.tools_called:
             message_kwargs["content"] = tool_call_info.content
             message_kwargs["tool_calls"] = tool_call_info.tool_calls

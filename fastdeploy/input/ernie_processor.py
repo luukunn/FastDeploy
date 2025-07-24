@@ -256,7 +256,7 @@ class ErnieProcessor(BaseDataProcessor):
             data_processor_logger.info(f"req_id:{req_id}, decode_status: {self.decode_status[req_id]}")
             del self.decode_status[req_id]
             if tool_parser:
-                response_dict["tool_call_info"] = tool_parser.extract_tool_calls(
+                response_dict["outputs"]["tool_call_info"] = tool_parser.extract_tool_calls(
                     full_text, response_dict)
         return response_dict
 
