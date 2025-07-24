@@ -55,8 +55,8 @@ class ErnieToolParser(ToolParser):
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.streamed_args_for_tool: list[str] = [
-        ]  # map what has been streamed for each tool so far to a list
+        self.streamed_args_for_tool: list[str] = []  # map what has been streamed for each tool so far to a list
+        self.bot_token = "["
 
     def extract_tool_calls(
             self, model_output: str,
@@ -65,10 +65,7 @@ class ErnieToolParser(ToolParser):
         Extract the tool calls from a complete model response.
         """
         # case -- if a tool call token is not present, return a text response
-        model_output = model_output.replace('<mask:8>[', '').replace(']<mask:9>', '').replace("[", "").replace("]", "")
-        print("="*50)
-        print(model_output)
-        print("="*50)
+        model_output = model_output.replace("[", "").replace("]", "")
         if not model_output.startswith('{'):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -91,6 +88,7 @@ class ErnieToolParser(ToolParser):
             tool_calls: list[ToolCall] = [
                 ToolCall(
                     type="function",
+                    id=random_tool_call_id(),
                     function=FunctionCall(
                         name=raw_function_call["name"],
                         # function call args are JSON but as a string
@@ -125,8 +123,10 @@ class ErnieToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
-        if not (current_text.startswith(self.bot_token)
-                or current_text.startswith('{')):
+        if len(current_text.strip()) == 0 or (len(current_text.strip()) == 1 and current_text) == '[':
+            return None
+        current_text = current_text.strip()
+        if not current_text.startswith('[{'):
             return DeltaMessage(content=delta_text)
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
@@ -143,6 +143,8 @@ class ErnieToolParser(ToolParser):
                 # prefix the output with the <|python_tag|> token
                 start_idx = len(self.bot_token) if current_text.startswith(
                     self.bot_token) else 0
+                if current_text.endswith("]"):
+                    return None
                 while start_idx < len(current_text):
                     (obj,end_idx) = partial_json_loads(current_text[start_idx:],
                                                    flags)

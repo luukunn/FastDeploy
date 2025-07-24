@@ -242,8 +242,17 @@ class OpenAIServingChat:
                     previous_num_tokens += len(output["token_ids"])
                     tool_delta_message = output["tool_delta_message"]
                     if tool_delta_message is None:
-                        continue
-                    elif tool_delta_message and tool_delta_message.content != None:
+                        if res["finished"]:
+                            delta_message = DeltaMessage(
+                                content=delta_text, 
+                                reasoning_content=output.get("reasoning_content"), \
+                                prompt_token_ids=None,
+                                completion_token_ids=None, 
+                                tool_calls=output.get("tool_call_content", []),
+                            )
+                        else:
+                            continue
+                    elif tool_delta_message == False or (tool_delta_message and tool_delta_message.content != None):
                         delta_message = DeltaMessage(
                             content=delta_text, 
                             reasoning_content=output.get("reasoning_content"), \
@@ -418,7 +427,6 @@ class OpenAIServingChat:
             "completion_token_ids": completion_token_ids if enable_return_token_ids else None,
         }
         tool_call_info = output.get("tool_call_info", None)
-        print(tool_call_info)
         if tool_call_info and tool_call_info.tools_called:
             message_kwargs["content"] = tool_call_info.content
             message_kwargs["tool_calls"] = tool_call_info.tool_calls
