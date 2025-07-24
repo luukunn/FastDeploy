@@ -122,6 +122,8 @@ class ErnieToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
+        if request["finished"] and delta_text == "]":
+            return None
 
         if len(current_text.strip()) == 0 or (len(current_text.strip()) == 1 and current_text) == '[':
             return None
@@ -143,8 +145,6 @@ class ErnieToolParser(ToolParser):
                 # prefix the output with the <|python_tag|> token
                 start_idx = len(self.bot_token) if current_text.startswith(
                     self.bot_token) else 0
-                if current_text.endswith("]"):
-                    return None
                 while start_idx < len(current_text):
                     (obj,end_idx) = partial_json_loads(current_text[start_idx:],
                                                    flags)
