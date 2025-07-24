@@ -65,7 +65,7 @@ class ErnieToolParser(ToolParser):
         Extract the tool calls from a complete model response.
         """
         # case -- if a tool call token is not present, return a text response
-        model_output = model_output.replace("[", "").replace("]", "")
+        model_output = model_output.strip("[]")
         if not model_output.startswith('{'):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
