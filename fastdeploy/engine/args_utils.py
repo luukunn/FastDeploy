@@ -90,6 +90,10 @@ class EngineArgs:
     """
     specifies the tool call parser  to use for extracting tool call from the model output
     """
+    tool_parser_plugin: str = None
+    """
+    tool parser plugin used to register user defined tool parsers
+    """
     enable_auto_tool_choice: bool = False
     """
     Flags to enable tool call
@@ -407,9 +411,15 @@ class EngineArgs:
         model_group.add_argument(
             "--tool-call-parser",
             type=str,
-            default=EngineArgs.reasoning_parser,
-            help="Flag specifies the tool call parser to use for extracting "
+            default=EngineArgs.tool_call_parser,
+            help="Flag specifies the tool call parser to use for extracting"
             "tool call from the model output",
+        )
+        model_group.add_argument(
+            "--tool-parser-plugin",
+            type=str,
+            default=EngineArgs.tool_parser_plugin,
+            help="tool parser plugin used to register user defined tool parsers",
         )
         model_group.add_argument(
             "--enable-auto-tool-choice",
