@@ -22,7 +22,6 @@ from typing import List, Optional
 
 import aiozmq
 import msgpack
-import numpy as np
 from aiozmq import zmq
 
 from fastdeploy.entrypoints.openai.protocol import (
@@ -53,13 +52,8 @@ class OpenAIServingChat:
     def __init__(self, engine_client, pid, dist_init_ip, tool_parser):
         self.engine_client = engine_client
         self.pid = pid
-        self.master_ip = ips
+        self.master_ip = dist_init_ip
         self.host_ip = get_host_ip()
-        if self.master_ip is not None:
-            if isinstance(self.master_ip, list):
-                self.master_ip = self.master_ip[0]
-            else:
-                self.master_ip = self.master_ip.split(",")[0]
         self.tool_parser = None
         if tool_parser:
             self.tool_parser = ToolParserManager.get_tool_parser(
@@ -92,8 +86,6 @@ class OpenAIServingChat:
             current_req_dict = request.to_dict_for_infer(request_id)
             current_req_dict["arrival_time"] = time.time()
             prompt_token_ids = self.engine_client.format_and_add_data(current_req_dict)
-            if isinstance(prompt_token_ids, np.ndarray):
-                prompt_token_ids = prompt_token_ids.tolist()
         except Exception as e:
             return ErrorResponse(code=400, message=str(e))
 
@@ -161,9 +153,7 @@ class OpenAIServingChat:
             if request.metadata is not None:
                 enable_thinking = request.metadata.get("enable_thinking")
                 include_stop_str_in_output = request.metadata.get("include_stop_str_in_output", False)
-            enable_return_token_ids = request.return_token_ids or (
-                request.extra_body is not None and request.extra_body.get("return_token_ids", False)
-            )
+            enable_return_token_ids = request.return_token_ids or (request.extra_body is not None and request.extra_body.get('return_token_ids', False))
             while num_choices > 0:
                 try:
                     raw_data = await asyncio.wait_for(dealer.read(), timeout=10)
@@ -206,13 +196,13 @@ class OpenAIServingChat:
                             choice = ChatCompletionResponseStreamChoice(
                                 index=i,
                                 delta=DeltaMessage(
-                                    role="assistant",
-                                    content="",
-                                    reasoning_content="",
+                                    role="assistant", 
+                                    content="", 
+                                    reasoning_content="", 
                                     tool_calls=None,
                                     prompt_token_ids=None,
                                     completion_token_ids=None,
-                                ),
+                                )
                             )
                             if enable_return_token_ids:
                                 choice.delta.prompt_token_ids = list(prompt_token_ids)
@@ -357,9 +347,7 @@ class OpenAIServingChat:
         final_res = None
         enable_thinking = None
         include_stop_str_in_output = False
-        enable_return_token_ids = request.return_token_ids or (
-            request.extra_body is not None and request.extra_body.get("return_token_ids", False)
-        )
+        enable_return_token_ids = request.return_token_ids or (request.extra_body is not None and request.extra_body.get('return_token_ids', False))
         try:
             dealer = await aiozmq.create_zmq_stream(zmq.DEALER, connect=f"ipc:///dev/shm/router_{self.pid}.ipc")
             dealer.write([b"", request_id.encode("utf-8")])

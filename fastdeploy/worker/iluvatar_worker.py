@@ -69,11 +69,11 @@ class IluvatarWorker(WorkerBase):
             local_rank=self.local_rank,
         )
 
-    def exist_prefill(self):
+    def prefill_finished(self):
         """
-        check whether prefill stage exist
+        check whether prefill stage finished
         """
-        return self.model_runner.exist_prefill()
+        return self.model_runner.prefill_finished()
 
     def determine_available_memory(self) -> int:
         """

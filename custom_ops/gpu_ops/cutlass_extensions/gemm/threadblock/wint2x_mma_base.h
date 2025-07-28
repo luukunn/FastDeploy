@@ -63,8 +63,8 @@ template <
     typename Policy_,
     /// Number of stages,
     int Stages,
-    /// Size of extra quantized params
-    typename QuantParamsShape>
+    /// Used for partial specialization
+    typename Enable = bool>
 class Wint2xMmaBase {
 public:
   ///< Size of the Gemm problem - concept: gemm::GemmShape<>
@@ -93,14 +93,6 @@ public:
   static int const kWarpGemmIterations =
       (WarpGemm::kK / Operator::Policy::MmaShape::kK);
 
-  /// Number of warp-level GEMM oeprations per load for B
-  static constexpr int kWarpGemmIterationsPerLoadForB =
-      Operator::IteratorB::InstructionShape::kRow / Operator::InstructionShape::kK;
-  static_assert(!(kWarpGemmIterations % kWarpGemmIterationsPerLoadForB), "");
-
-  static constexpr int kWarpLoadIterationsForB =
-      kWarpGemmIterations / kWarpGemmIterationsPerLoadForB;
-
   /// Number of stages
   static int const kStages = Stages;
 
@@ -111,6 +103,8 @@ public:
   /// Tensor reference to the B operand
   using TensorRefB =
       TensorRef<typename Operator::ElementB, typename Operator::LayoutB>;
+
+  // using TensorRefZippedB = TensorRef<uint8_t, typename Operator::LayoutB>;
 
   static_assert(kWarpGemmIterations > 1,
                 "The pipelined structure requires at least two warp-level "
@@ -136,11 +130,20 @@ public:
                     Shape::kK * kStages + Policy::SmemPaddingA::kColumn>;
 
     /// Shape of the B matrix operand in shared memory
-    using ShapeB = MatrixShape<Shape::kK * kStages + Policy::SmemPaddingB::kRow,
+    using ShapeB = MatrixShape<Shape::kK + Policy::SmemPaddingB::kRow,
                                Shape::kN + Policy::SmemPaddingB::kColumn>;
 
-    /// Shape of all quant params in shared memory
-    using QuantParamsShapeB = QuantParamsShape;
+    // w uint8; local_scale uint8;
+    constexpr static int kZippedRowsPerStages =
+	Shape::kK / 4 + (Shape::kK + 127) / 128;
+
+    // code_scale float; code_zp float; super_scale ElementB
+    constexpr static int kColumnWiseParamsRows = 2 * sizeof(float) +
+        sizeof_bits<typename Operator::ElementB>::value / 8;
+
+    using ZippedShapeB = MatrixShape<kColumnWiseParamsRows + kZippedRowsPerStages * kStages, Shape::kN>;
+
+    using NopaddingShapeB = MatrixShape<Shape::kK, Shape::kN>;
 
   public:
     //
@@ -153,8 +156,12 @@ public:
     /// Buffer for B operand
     AlignedBuffer<typename Operator::ElementB, ShapeB::kCount> operand_B;
 
-    /// Buffer for extra quant params of B operand
-    AlignedBuffer<uint8_t, QuantParamsShapeB::kCount> operand_quant_params_B;
+    /// Buffer for quanted B operand
+    AlignedBuffer<uint8_t, ZippedShapeB::kCount> operand_zipped_B;
+
+    /// Buffer for unzip B operand
+    AlignedBuffer<typename Operator::ElementB, NopaddingShapeB::kCount>
+        operand_unzip_B;
 
   public:
     //
@@ -183,6 +190,14 @@ public:
     CUTLASS_HOST_DEVICE
     TensorRefB operand_B_ref() {
       return TensorRefB{operand_B.data(), LayoutB()};
+    }
+
+    CUTLASS_HOST_DEVICE
+    uint8_t *operand_zipped_B_ptr() { return operand_zipped_B.data(); }
+
+    CUTLASS_HOST_DEVICE
+    typename Operator::ElementB *operand_unzip_B_ptr() {
+      return operand_unzip_B.data();
     }
   };
 

@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional
 
 import paddle
-from paddle.nn.functional.flash_attention import flash_attn_unpadded
 
 try:
     from paddle.nn.functional.flash_attention import flash_attention_v3_varlen
@@ -92,7 +91,6 @@ class FlashAttentionBackend(AttentionBackend):
 
     __infer_dynamic_dims_fields__ = ["attention_metadata"]
     attention_metadata: FlashAttentionMetadata
-    flash_attn_func: callable = None
 
     def __init__(
         self,
@@ -112,8 +110,8 @@ class FlashAttentionBackend(AttentionBackend):
         self.kv_num_heads = kv_num_heads
         self.num_heads = num_heads
         self.head_dim = fd_config.model_config.head_dim
-        self.attn_outputsize_tp = self.num_heads * self.head_dim
-        self.block_size = fd_config.cache_config.block_size
+        self.hidden_size = fd_config.model_config.hidden_size
+        self.block_size = fd_config.parallel_config.block_size
         self.num_layers: int = fd_config.model_config.num_hidden_layers
 
         self.speculative_method = fd_config.speculative_config.method
@@ -131,22 +129,6 @@ class FlashAttentionBackend(AttentionBackend):
 
         self.rank, self.device_id = init_rank_and_device_id(fd_config)
 
-        if self.flash_attn_func is None:
-            prop = paddle.device.cuda.get_device_properties()
-            cc = prop.major * 10 + prop.minor
-            is_current_sm_supported = cc >= 90
-            is_paddle_supported = any(num >= 90 for num in paddle.version.cuda_archs())
-            if is_current_sm_supported and is_paddle_supported:
-                self.flash_attn_func = flash_attention_v3_varlen
-                print("The current platform supports Flash Attention V3.")
-                self.flash_attn_kwargs = {}
-            else:
-                self.flash_attn_func = flash_attn_unpadded
-                self.flash_attn_kwargs = {"scale": self.head_dim**-0.5, "training": False}
-                print(
-                    "The current platform does not support Flash Attention V3, so Flash Attention V2 will be used instead."
-                )
-
     def get_attntion_meta(self):
         """get_attntion_meta"""
         return self.attention_metadata
@@ -154,25 +136,16 @@ class FlashAttentionBackend(AttentionBackend):
     def get_kv_cache_shape(
         self,
         max_num_blocks: int,
-        kv_cache_quant_type: str = None,
     ):
         """
         Caculate kv cache shape
         """
-        if kv_cache_quant_type is not None and kv_cache_quant_type == "int4_zp":
-            return (
-                max_num_blocks,
-                self.kv_num_heads,
-                self.block_size,
-                self.head_dim // 2,
-            )
-        else:
-            return (
-                max_num_blocks,
-                self.kv_num_heads,
-                self.block_size,
-                self.head_dim,
-            )
+        return (
+            max_num_blocks,
+            self.kv_num_heads,
+            self.block_size,
+            self.head_dim,
+        )
 
     def init_attention_metadata(self, forward_meta: ForwardMeta):
         metadata = FlashAttentionMetadata()
@@ -265,7 +238,8 @@ class FlashAttentionBackend(AttentionBackend):
             forward_meta.seq_lens_this_time,
             forward_meta.seq_lens_encoder,
             forward_meta.seq_lens_decoder,
-            forward_meta.batch_id_per_token,
+            forward_meta.padding_offset,
+            forward_meta.cum_offsets,
             metadata.block_tables,
             metadata.kv_batch_ids,
             metadata.kv_tile_ids_per_batch,
@@ -280,12 +254,11 @@ class FlashAttentionBackend(AttentionBackend):
             getattr(layer, "cache_k_zp", None),
             getattr(layer, "cache_v_zp", None),
             metadata.kv_signal_data_list[layer.layer_id],
-            metadata.kv_token_num_cpu[0].item(),
+            metadata.kv_token_num_cpu[0],
             self.max_seq_len,
             getattr(layer, "cache_quant_type_str", "none"),
         )
-
-        res = self.flash_attn_func(
+        res = flash_attention_v3_varlen(
             q,
             k,
             v,
@@ -294,6 +267,5 @@ class FlashAttentionBackend(AttentionBackend):
             max_seqlen_q=metadata.set_max_lengths[0],
             max_seqlen_k=metadata.set_max_lengths[3],
             causal=self.causal,
-            **self.flash_attn_kwargs,
-        )[0].reshape([-1, self.attn_outputsize_tp])
+        )[0].reshape([-1, self.hidden_size])
         return res

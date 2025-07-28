@@ -41,6 +41,7 @@ logger = get_logger("xpu_model_runner", "xpu_model_runner.log")
 
 
 def xpu_pre_process(
+    max_len: int,
     input_ids: paddle.Tensor,
     seq_lens_this_time: int,
     share_inputs: Dict,
@@ -50,7 +51,6 @@ def xpu_pre_process(
     seq_lens_decoder: Optional[paddle.Tensor] = None,
 ) -> XPUForwardMeta:
     """ """
-    max_len = input_ids.shape[1]
     cum_offsets_now = paddle.cumsum(max_len - seq_lens_this_time)
     token_num = paddle.sum(seq_lens_this_time)
     from fastdeploy.model_executor.ops.xpu import (
@@ -428,15 +428,15 @@ class XPUModelRunner(ModelRunnerBase):
 
         # Set block tables
         pre_max_block_num = (
-            self.parallel_config.max_model_len + self.cache_config.block_size - 1
-        ) // self.cache_config.block_size + self.cache_config.enc_dec_block_num
+            self.parallel_config.max_model_len + self.parallel_config.block_size - 1
+        ) // self.parallel_config.block_size + self.parallel_config.enc_dec_block_num
         self.share_inputs["block_tables"] = paddle.full([max_num_seqs, pre_max_block_num], -1, dtype="int32")
 
         # Initialize free list
         free_list = list(
             range(
                 self.parallel_config.total_block_num - 1,
-                int(self.parallel_config.total_block_num * self.cache_config.kv_cache_ratio) - 1,
+                int(self.parallel_config.total_block_num * self.parallel_config.kv_cache_ratio) - 1,
                 -1,
             )
         )
@@ -458,6 +458,7 @@ class XPUModelRunner(ModelRunnerBase):
     def _prepare_inputs(self) -> None:
         """prepare the model inputs"""
         self.forward_meta = xpu_pre_process(
+            self.parallel_config.max_model_len,
             self.share_inputs["input_ids"],
             self.share_inputs["seq_lens_this_time"],
             self.share_inputs,
@@ -520,19 +521,14 @@ class XPUModelRunner(ModelRunnerBase):
 
         cache_type = self.parallel_config.dtype
 
-        kv_cache_quant_type = None
         if (
             self.quant_config
             and hasattr(self.quant_config, "kv_cache_quant_type")
             and self.quant_config.kv_cache_quant_type is not None
         ):
             cache_type = "uint8"
-            kv_cache_quant_type = self.quant_config.kv_cache_quant_type
 
-        # Get kv cache shape
-        kv_cache_shape = self.attn_backends[0].get_kv_cache_shape(
-            max_num_blocks=max_block_num, kv_cache_quant_type=kv_cache_quant_type
-        )
+        kv_cache_shape = self.attn_backends[0].get_kv_cache_shape(max_num_blocks=max_block_num)
 
         for i in range(self.model_config.num_hidden_layers):
             cache_kvs[f"key_caches_{i}"] = paddle.full(
@@ -584,9 +580,9 @@ class XPUModelRunner(ModelRunnerBase):
         logger.warn("XPU not support cuda graph currently")
         pass
 
-    def exist_prefill(self):
+    def prefill_finished(self):
         """
-        check whether prefill stage exist
+        check whether prefill stage finished
         """
         if int(paddle.max(self.share_inputs["seq_lens_encoder"])) != 0:
             return 1
@@ -598,8 +594,8 @@ class XPUModelRunner(ModelRunnerBase):
         full_length = min(num_tokens // batch_size, self.parallel_config.max_model_len - 10)
         input_length = int(full_length - 512)
         block_num = (
-            input_length + self.cache_config.block_size - 1
-        ) // self.cache_config.block_size + self.cache_config.enc_dec_block_num
+            input_length + self.parallel_config.block_size - 1
+        ) // self.parallel_config.block_size + self.parallel_config.enc_dec_block_num
 
         for i in range(batch_size):
             idx = i
@@ -707,8 +703,8 @@ class XPUModelRunner(ModelRunnerBase):
         self.share_inputs["infer_seed"][:] %= self.MAX_INFER_SEED
         step_paddle(
             self.share_inputs,
-            self.cache_config.block_size,
-            self.cache_config.enc_dec_block_num,
+            self.parallel_config.block_size,
+            self.parallel_config.enc_dec_block_num,
         )
 
         return None
@@ -764,7 +760,7 @@ class XPUModelRunner(ModelRunnerBase):
         required_memory = (
             byte_of_dtype
             * 2  # k + v
-            * (self.cache_config.block_size * hidden_dim)
+            * (self.parallel_config.block_size * hidden_dim)
             * self.model_config.num_hidden_layers
         )
         return required_memory
@@ -784,7 +780,7 @@ class XPUModelRunner(ModelRunnerBase):
         free_list = list(
             range(
                 self.num_gpu_blocks - 1,
-                int(self.num_gpu_blocks * self.cache_config.kv_cache_ratio) - 1,
+                int(self.num_gpu_blocks * self.parallel_config.kv_cache_ratio) - 1,
                 -1,
             )
         )

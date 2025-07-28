@@ -19,13 +19,15 @@ from dataclasses import asdict, dataclass
 from dataclasses import fields as dataclass_fields
 from typing import Any, Dict, List, Optional
 
-from fastdeploy.config import (
+from fastdeploy.engine.config import (
     CacheConfig,
+    Config,
     GraphOptimizationConfig,
+    ModelConfig,
+    ParallelConfig,
     SpeculativeConfig,
     TaskOption,
 )
-from fastdeploy.engine.config import Config, ModelConfig, ParallelConfig
 from fastdeploy.scheduler.config import SchedulerConfig
 from fastdeploy.utils import FlexibleArgumentParser
 
@@ -43,10 +45,6 @@ class EngineArgs:
     model: str = "baidu/ernie-45-turbo"
     """
     The name or path of the model to be used.
-    """
-    revision: Optional[str] = "master"
-    """
-    The revision for downloading models.
     """
     model_config_name: Optional[str] = "config.json"
     """
@@ -144,14 +142,19 @@ class EngineArgs:
     Ratio of tokens to process in a block.
     """
 
-    prealloc_dec_block_slot_num_threshold: int = 5
+    dist_init_ip: Optional[str] = None
     """
-    Token slot threshold for preallocating decoder blocks.
+    The master node ip of multinode deployment
     """
-    ips: Optional[List[str]] = None
-    """
-    The ips of multinode deployment
 
+    nnodes: int = 1
+    """
+    The number of nodes in multinode deployment
+    """
+
+    node_rank: int = 0
+    """
+    The rank of the current node in multinode deployment
     """
 
     swap_space: float = None
@@ -343,12 +346,6 @@ class EngineArgs:
             type=str,
             default=EngineArgs.model,
             help="Model name or path to be used.",
-        )
-        model_group.add_argument(
-            "--revision",
-            type=nullable_str,
-            default=EngineArgs.revision,
-            help="Revision for downloading models",
         )
         model_group.add_argument(
             "--model-config-name",
@@ -560,14 +557,10 @@ class EngineArgs:
         )
 
         cache_group.add_argument(
-            "--swap-space", type=float, default=EngineArgs.swap_space, help="The amount of CPU memory to offload to."
-        )
-
-        cache_group.add_argument(
-            "--prealloc-dec-block-slot-num-threshold",
-            type=int,
-            default=5,
-            help="Number of token slot threadshold to allocate next blocks for decoding.",
+            "--swap-space",
+            type=float,
+            default=EngineArgs.swap_space,
+            help="The amount of CPU memory to offload to.",
         )
 
         cache_group.add_argument(
@@ -586,10 +579,23 @@ class EngineArgs:
         # Cluster system parameters group
         system_group = parser.add_argument_group("System Configuration")
         system_group.add_argument(
-            "--ips",
-            type=lambda s: s.split(",") if s else None,
-            default=EngineArgs.ips,
-            help="IP addresses of all nodes participating in distributed inference.",
+            "--dist-init-ip",
+            default=EngineArgs.dist_init_ip,
+            help="IP addresses of master node.",
+        )
+
+        system_group.add_argument(
+            "--nnodes",
+            type=int,
+            default=EngineArgs.nnodes,
+            help="The number of all nodes.",
+        )
+
+        system_group.add_argument(
+            "--node-rank",
+            type=int,
+            default=EngineArgs.node_rank,
+            help="node rank id (range [0, nnodes)).",
         )
 
         # Performance tuning parameters group
@@ -800,14 +806,33 @@ class EngineArgs:
             load_strategy=self.load_strategy,
         )
 
+    def create_cache_config(self, model_cfg) -> CacheConfig:
+        """
+        Create and return a CacheConfig object based on the current settings.
+        """
+        return CacheConfig(
+            block_size=self.block_size,
+            tensor_parallel_size=self.tensor_parallel_size,
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            num_gpu_blocks_override=self.num_gpu_blocks_override,
+            kv_cache_ratio=self.kv_cache_ratio,
+            enable_prefix_caching=self.enable_prefix_caching,
+            swap_space=self.swap_space,
+            cache_queue_port=self.cache_queue_port,
+            model_cfg=model_cfg,
+            enable_chunked_prefill=self.enable_chunked_prefill,
+            enc_dec_block_num=self.static_decode_blocks,
+            rdma_comm_ports=self.rdma_comm_ports,
+            cache_transfer_protocol=self.cache_transfer_protocol,
+            pd_comm_port=self.pd_comm_port,
+        )
+
     def create_speculative_config(self) -> SpeculativeConfig:
         """ """
-        speculative_args = asdict(self)
         if self.speculative_config is not None:
-            for k, v in self.speculative_config.items():
-                speculative_args[k] = v
-
-        return SpeculativeConfig(speculative_args)
+            return SpeculativeConfig(**self.speculative_config)
+        else:
+            return SpeculativeConfig()
 
     def create_scheduler_config(self) -> SchedulerConfig:
         """
@@ -848,11 +873,10 @@ class EngineArgs:
         """
         Create and retuan a GraphOptimizationConfig object based on the current settings.
         """
-        graph_optimization_args = asdict(self)
         if self.graph_optimization_config is not None:
-            for k, v in self.graph_optimization_config.items():
-                graph_optimization_args[k] = v
-        return GraphOptimizationConfig(graph_optimization_args)
+            return GraphOptimizationConfig(**self.graph_optimization_config)
+        else:
+            return GraphOptimizationConfig()
 
     def create_engine_config(self) -> Config:
         """
@@ -875,23 +899,21 @@ class EngineArgs:
             self.tensor_parallel_size <= 1 and self.enable_custom_all_reduce
         ), "enable_custom_all_reduce must be used with tensor_parallel_size>1"
 
-        all_dict = asdict(self)
-        all_dict["model_cfg"] = model_cfg
-        cache_cfg = CacheConfig(all_dict)
-
         return Config(
             model_name_or_path=self.model,
             model_config=model_cfg,
             scheduler_config=scheduler_cfg,
             tokenizer=self.tokenizer,
-            cache_config=cache_cfg,
+            cache_config=self.create_cache_config(model_cfg),
             parallel_config=self.create_parallel_config(),
             max_model_len=self.max_model_len,
             tensor_parallel_size=self.tensor_parallel_size,
             max_num_seqs=self.max_num_seqs,
             speculative_config=speculative_cfg,
             max_num_batched_tokens=self.max_num_batched_tokens,
-            ips=self.ips,
+            dist_init_ip=self.dist_init_ip,
+            nnodes=self.nnodes,
+            node_rank=self.node_rank,
             use_warmup=self.use_warmup,
             engine_worker_queue_port=self.engine_worker_queue_port,
             limit_mm_per_prompt=self.limit_mm_per_prompt,

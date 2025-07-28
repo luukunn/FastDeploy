@@ -50,7 +50,6 @@ class RequestFuncInput:
     multi_modal_content: Optional[dict] = None
     ignore_eos: bool = False
     language: Optional[str] = None
-    debug: bool = False
 
 
 @dataclass
@@ -99,8 +98,7 @@ async def async_request_eb_openai_chat_completions(
         if request_func_input.ignore_eos:
             payload["ignore_eos"] = request_func_input.ignore_eos
 
-        if request_func_input.debug:
-            print(f"payload:{json.dumps(payload, ensure_ascii=False)}")
+        print(f"payload:{json.dumps(payload, ensure_ascii=False)}")
 
         headers = {
             "Content-Type": "application/json",
@@ -181,8 +179,7 @@ async def async_request_eb_openai_chat_completions(
                 f.write(str(output) + "\n")
     if pbar:
         pbar.update(1)
-    if request_func_input.debug:
-        print("#####final_output:", output)
+    print("#####final_output:", output)
     return output
 
 
@@ -212,8 +209,7 @@ async def async_request_eb_openai_completions(
         if request_func_input.ignore_eos:
             payload["ignore_eos"] = request_func_input.ignore_eos
 
-        if request_func_input.debug:
-            print("payload:", json.dumps(payload, ensure_ascii=False))
+        print("payload:", json.dumps(payload, ensure_ascii=False))
 
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
@@ -292,8 +288,7 @@ async def async_request_eb_openai_completions(
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
 
-        if request_func_input.debug:
-            print(f"final_output:{output}")
+        print(f"final_output:{output}")
 
     if pbar:
         pbar.update(1)

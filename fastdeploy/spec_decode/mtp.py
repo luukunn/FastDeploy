@@ -97,10 +97,10 @@ class MTPProposer(Proposer):
             num_tokens // batch_size,
             self.parallel_config.max_model_len - max_dec_len,
         )
-        input_length = int(full_length * self.cache_config.kv_cache_ratio)
+        input_length = int(full_length * self.parallel_config.kv_cache_ratio)
         block_num = (
-            input_length + self.cache_config.block_size - 1
-        ) // self.cache_config.block_size + self.cache_config.enc_dec_block_num
+            input_length + self.parallel_config.block_size - 1
+        ) // self.parallel_config.block_size + self.parallel_config.enc_dec_block_num
 
         for i in range(batch_size):
             idx = i
@@ -127,21 +127,17 @@ class MTPProposer(Proposer):
 
         cache_type = self.parallel_config.dtype
 
-        kv_cache_quant_type = None
         if (
             self.quant_config
             and hasattr(self.quant_config, "kv_cache_quant_type")
             and self.quant_config.kv_cache_quant_type is not None
         ):
             cache_type = "uint8"
-            kv_cache_quant_type = self.quant_config.kv_cache_quant_type
 
         # Get kv cache shape
-        kv_cache_shape = self.attn_backends[0].get_kv_cache_shape(
-            max_num_blocks=self.num_gpu_blocks, kv_cache_quant_type=kv_cache_quant_type
-        )
+        kv_cache_shape = self.attn_backends[0].get_kv_cache_shape(max_num_blocks=self.num_gpu_blocks)
         if not self.parallel_config.do_profile and (
-            self.cache_config.enable_prefix_caching or self.parallel_config.splitwise_role != "mixed"
+            self.parallel_config.enable_prefix_caching or self.parallel_config.splitwise_role != "mixed"
         ):
             cache_kvs_list = []
             for i in range(
@@ -219,14 +215,14 @@ class MTPProposer(Proposer):
 
         self.main_model_num_gpu_blocks = num_gpu_blocks
         self.num_gpu_blocks = int(num_gpu_blocks * self.speculative_config.num_gpu_block_expand_ratio)
-        if not (self.cache_config.enable_prefix_caching or self.parallel_config.splitwise_role != "mixed"):
+        if not (self.parallel_config.enable_prefix_caching or self.parallel_config.splitwise_role != "mixed"):
             self.initialize_kv_cache()
 
         # Reset free list
         free_list = list(
             range(
                 self.num_gpu_blocks - 1,
-                int(self.main_model_num_gpu_blocks * self.cache_config.kv_cache_ratio) - 1,
+                int(self.main_model_num_gpu_blocks * self.parallel_config.kv_cache_ratio) - 1,
                 -1,
             )
         )
@@ -275,7 +271,6 @@ class MTPProposer(Proposer):
         # self.model_inputs["caches"] = self.cache_kvs
         # Inherit generation hyperparameters from the main model for consistency
         self.model_inputs["top_p"] = self.main_model_inputs["top_p"]
-        self.model_inputs["top_k"] = self.main_model_inputs["top_k"]
         self.model_inputs["temperature"] = self.main_model_inputs["temperature"]
         self.model_inputs["eos_token_id"] = self.main_model_inputs["eos_token_id"]
         self.model_inputs["penalty_score"] = self.main_model_inputs["penalty_score"]
@@ -300,7 +295,7 @@ class MTPProposer(Proposer):
         self.free_list = list(
             range(
                 self.parallel_config.total_block_num - 1,
-                int(self.parallel_config.total_block_num * self.cache_config.kv_cache_ratio) - 1,
+                int(self.parallel_config.total_block_num * self.parallel_config.kv_cache_ratio) - 1,
                 -1,
             )
         )
@@ -345,7 +340,7 @@ class MTPProposer(Proposer):
                 self.model_inputs["pre_ids"][idx : idx + 1] = request.prompt_token_ids[-1]
                 prefill_token_num = self.max_draft_token_num + 1
                 self.model_inputs["draft_tokens"][idx : idx + 1, 0:1] = paddle.to_tensor(
-                    request.draft_token_ids[1:2], dtype="int64"
+                    request.draft_token_ids[0:1], dtype="int64"
                 )
 
                 self.model_inputs["seq_lens_encoder"][idx : idx + 1] = 0
@@ -372,7 +367,7 @@ class MTPProposer(Proposer):
                     ]
                 self.model_inputs["pre_ids"][idx : idx + 1] = -1
                 self.model_inputs["step_idx"][idx : idx + 1] = 0
-                if self.cache_config.enable_chunked_prefill:
+                if self.parallel_config.enable_chunked_prefill:
                     token_chunk_size = request.prefill_chunk_info[0]
                     self.model_inputs["seq_lens_encoder"][idx : idx + 1] = token_chunk_size
                     self.model_inputs["seq_lens_this_time"][idx : idx + 1] = token_chunk_size
@@ -496,6 +491,13 @@ class MTPProposer(Proposer):
         """
         for substep in range(self.max_draft_token_num):
             if self.model_inputs["not_need_stop"]:
+                if substep != 0:
+                    target_hidden_states = eagle_get_self_hidden_states(
+                        hiddden_states,
+                        self.last_seq_lens_this_time,
+                        self.model_inputs["seq_lens_this_time"],
+                        self.model_inputs["step_idx"],
+                    )
                 self.model_inputs["substep"] = substep
                 # Remove padding
                 (
@@ -507,6 +509,7 @@ class MTPProposer(Proposer):
                     output_cum_offsets,
                     output_padding_offset,
                 ) = pre_process(
+                    self.parallel_config.max_model_len,
                     self.model_inputs["input_ids"],
                     self.model_inputs["seq_lens_this_time"],
                     True,
@@ -529,7 +532,6 @@ class MTPProposer(Proposer):
                 self.sampling_metadata = SamplingMetadata(
                     temperature=self.model_inputs["temperature"],
                     top_p=self.model_inputs["top_p"],
-                    top_k=self.model_inputs["top_k"],
                     step_idx=self.model_inputs["step_idx"],
                     pre_token_ids=self.model_inputs["pre_ids"],
                     frequency_penalties=self.model_inputs["frequency_score"],
@@ -541,15 +543,17 @@ class MTPProposer(Proposer):
                 )
 
                 if self.max_draft_token_num > 1:
-                    self.last_seq_lens_this_time = paddle.clone(self.model_inputs["seq_lens_this_time"])
-
+                    self.last_seq_lens_this_time = paddle.clone(
+                        self.model_inputs["seq_lens_this_time"]
+                    )
+    
                 model_output = self.model(
                     ids_remove_padding=self.model_inputs["ids_remove_padding"],
                     previous_hidden_states=target_hidden_states,
                     forward_meta=self.forward_meta,
                 )
 
-                hidden_states = rebuild_padding(
+                hiddden_states = rebuild_padding(
                     model_output,
                     self.model_inputs["cum_offsets"],
                     self.model_inputs["seq_lens_this_time"],
@@ -560,7 +564,7 @@ class MTPProposer(Proposer):
                 )
 
                 # 4. Compute logits, Sample
-                logits = self.model.compute_logits(hidden_states)
+                logits = self.model.compute_logits(hiddden_states)
 
                 sampled_token_ids = self.sampler(
                     logits,
@@ -573,21 +577,6 @@ class MTPProposer(Proposer):
                     paddle.distributed.broadcast(sampled_token_ids, 0)
 
                 self._post_process(sampled_token_ids)
-
-                if substep != self.max_draft_token_num - 1:
-                    target_hidden_states = self._get_self_hidden_states(hidden_states)
-
-    def _get_self_hidden_states(self, hidden_states):
-        target_hidden_states = eagle_get_self_hidden_states(
-            hidden_states,
-            self.last_seq_lens_this_time,
-            self.model_inputs["seq_lens_this_time"],
-            self.model_inputs["step_idx"],
-        )
-        if isinstance(target_hidden_states, list):
-            target_hidden_states = target_hidden_states[0]
-
-        return target_hidden_states
 
     def update_task_chunk_prefill(self, task):
         """
@@ -642,7 +631,7 @@ class MTPProposer(Proposer):
             self.model_inputs["used_list_len"],
             self.model_inputs["free_list"],
             self.model_inputs["free_list_len"],
-            self.cache_config.block_size,
+            self.parallel_config.block_size,
             self.max_draft_token_num,
         )
 
