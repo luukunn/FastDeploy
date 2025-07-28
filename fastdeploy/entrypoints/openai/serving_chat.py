@@ -42,6 +42,7 @@ from fastdeploy.entrypoints.openai.protocol import (
 from fastdeploy.metrics.work_metrics import work_process_metrics
 from fastdeploy.utils import api_server_logger, get_host_ip
 from fastdeploy.worker.output import LogprobsLists
+from fastdeploy.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 
 
 class OpenAIServingChat:
@@ -49,7 +50,7 @@ class OpenAIServingChat:
     OpenAI-style chat completions serving
     """
 
-    def __init__(self, engine_client, pid, ips):
+    def __init__(self, engine_client, pid, dist_init_ip, tool_parser):
         self.engine_client = engine_client
         self.pid = pid
         self.master_ip = ips
@@ -59,6 +60,11 @@ class OpenAIServingChat:
                 self.master_ip = self.master_ip[0]
             else:
                 self.master_ip = self.master_ip.split(",")[0]
+        self.tool_parser = None
+        if tool_parser:
+            self.tool_parser = ToolParserManager.get_tool_parser(
+                        tool_parser)
+
 
     def _check_master(self):
         if self.master_ip is None:
@@ -144,6 +150,9 @@ class OpenAIServingChat:
             choices=[],
             model=model_name,
         )
+        tool_parser = None
+        if self.tool_parser:
+            tool_parser = self.tool_parser(self.engine_client.data_processor.tokenizer)
         try:
             dealer = await aiozmq.create_zmq_stream(zmq.DEALER, connect=f"ipc:///dev/shm/router_{self.pid}.ipc")
             dealer.write([b"", request_id.encode("utf-8")])
@@ -182,6 +191,7 @@ class OpenAIServingChat:
                         stream=True,
                         enable_thinking=enable_thinking,
                         include_stop_str_in_output=include_stop_str_in_output,
+                        tool_parser=tool_parser,
                     )
 
                     if res["metrics"]["first_token_time"] is not None:
@@ -240,13 +250,28 @@ class OpenAIServingChat:
                         )
 
                     previous_num_tokens += len(output["token_ids"])
-                    delta_message = DeltaMessage(
-                        content=delta_text,
-                        reasoning_content=output.get("reasoning_content"),
-                        prompt_token_ids=None,
-                        completion_token_ids=None,
-                        tool_calls=output.get("tool_call_content", []),
-                    )
+                    tool_delta_message = output["tool_delta_message"]
+                    if tool_delta_message is None:
+                        if res["finished"]:
+                            delta_message = DeltaMessage(
+                                content=delta_text, 
+                                reasoning_content=output.get("reasoning_content"), \
+                                prompt_token_ids=None,
+                                completion_token_ids=None, 
+                                tool_calls=output.get("tool_call_content", []),
+                            )
+                        else:
+                            continue
+                    elif tool_delta_message == False or (tool_delta_message and tool_delta_message.content != None):
+                        delta_message = DeltaMessage(
+                            content=delta_text, 
+                            reasoning_content=output.get("reasoning_content"), \
+                            prompt_token_ids=None,
+                            completion_token_ids=None, 
+                            tool_calls=output.get("tool_call_content", []),
+                        )
+                    else:
+                        delta_message = tool_delta_message
 
                     choice = ChatCompletionResponseStreamChoice(
                         index=0,
@@ -343,6 +368,9 @@ class OpenAIServingChat:
             current_waiting_time = 0
             logprob_contents = []
             completion_token_ids = []
+            tool_parser = None
+            if self.tool_parser:
+                tool_parser = self.tool_parser(self.engine_client.data_processor.tokenizer)
             while True:
                 try:
                     raw_data = await asyncio.wait_for(dealer.read(), timeout=10)
@@ -371,6 +399,7 @@ class OpenAIServingChat:
                         stream=False,
                         enable_thinking=enable_thinking,
                         include_stop_str_in_output=include_stop_str_in_output,
+                        tool_parser=tool_parser,
                     )
                     # api_server_logger.debug(f"Client {request_id} received: {data}")
                     previous_num_tokens += len(data["outputs"]["token_ids"])
@@ -400,16 +429,23 @@ class OpenAIServingChat:
         finally:
             dealer.close()
 
-        choices = []
         output = final_res["outputs"]
-        message = ChatMessage(
-            role="assistant",
-            content=output["text"],
-            reasoning_content=output.get("reasoning_content"),
-            tool_calls=output.get("tool_call_content"),
-            prompt_token_ids=prompt_token_ids if enable_return_token_ids else None,
-            completion_token_ids=(completion_token_ids if enable_return_token_ids else None),
-        )
+        tool_calls = None
+        message_kwargs = {
+            "role": "assistant",
+            "reasoning_content": output.get("reasoning_content"),
+            "tool_calls": None,
+            "prompt_token_ids": prompt_token_ids if enable_return_token_ids else None,
+            "completion_token_ids": completion_token_ids if enable_return_token_ids else None,
+        }
+        tool_call_info = output.get("tool_call_info", None)
+        if tool_call_info and tool_call_info.tools_called:
+            message_kwargs["content"] = tool_call_info.content
+            message_kwargs["tool_calls"] = tool_call_info.tool_calls
+        else:
+            message_kwargs["content"] = output["text"]
+        message = ChatMessage(**message_kwargs)
+        choices = []
         logprobs_full_res = None
         if logprob_contents:
             logprobs_full_res = LogProbs(content=logprob_contents)
