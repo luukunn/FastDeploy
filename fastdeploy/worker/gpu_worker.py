@@ -22,6 +22,7 @@ import paddle
 import pynvml
 from paddle import nn
 
+from fastdeploy import envs
 from fastdeploy.config import FDConfig
 from fastdeploy.engine.request import Request
 from fastdeploy.platforms import current_platform
@@ -77,11 +78,11 @@ class GpuWorker(WorkerBase):
             local_rank=self.local_rank,
         )
 
-    def prefill_finished(self):
+    def exist_prefill(self):
         """
-        Check whether prefill stage finished
+        check whether prefill stage exist
         """
-        return self.model_runner.prefill_finished()
+        return self.model_runner.exist_prefill()
 
     def determine_available_memory(self) -> int:
         """
@@ -99,13 +100,14 @@ class GpuWorker(WorkerBase):
         # 1. Record memory state before profile run
         start_time = time.perf_counter()
         Gb = 1024**3
-        paddle.device.cuda.reset_max_memory_reserved(self.local_rank)
-        paddle.device.cuda.reset_max_memory_allocated(self.local_rank)
-        paddle_reserved_mem_before_run = paddle.device.cuda.max_memory_reserved(self.local_rank)
-        paddle_allocated_mem_before_run = paddle.device.cuda.max_memory_allocated(self.local_rank)  # not reserved
+        local_rank = self.local_rank % self.max_chips_per_node
+        paddle.device.cuda.reset_max_memory_reserved(local_rank)
+        paddle.device.cuda.reset_max_memory_allocated(local_rank)
+        paddle_reserved_mem_before_run = paddle.device.cuda.max_memory_reserved(local_rank)
+        paddle_allocated_mem_before_run = paddle.device.cuda.max_memory_allocated(local_rank)  # not reserved
 
         pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(int(self.device_ids[self.local_rank]))
+        handle = pynvml.nvmlDeviceGetHandleByIndex(int(self.device_ids[local_rank]))
         before_run_meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
 
         logger.info(
@@ -123,8 +125,8 @@ class GpuWorker(WorkerBase):
         self.model_runner.profile_run()
 
         # 3. Statistical memory information
-        paddle_reserved_mem_after_run = paddle.device.cuda.max_memory_reserved(self.local_rank)
-        paddle_allocated_mem_after_run = paddle.device.cuda.max_memory_allocated(self.local_rank)
+        paddle_reserved_mem_after_run = paddle.device.cuda.max_memory_reserved(local_rank)
+        paddle_allocated_mem_after_run = paddle.device.cuda.max_memory_allocated(local_rank)
 
         model_block_memory_used = self.cal_theortical_kvcache()
         paddle_peak_increase = paddle_reserved_mem_after_run - paddle_allocated_mem_before_run
@@ -135,7 +137,7 @@ class GpuWorker(WorkerBase):
         pynvml.nvmlShutdown()
 
         available_kv_cache_memory = (
-            after_run_meminfo.total * self.parallel_config.gpu_memory_utilization
+            after_run_meminfo.total * self.cache_config.gpu_memory_utilization
             - after_run_meminfo.used
             - paddle_peak_increase
         )
@@ -183,12 +185,17 @@ class GpuWorker(WorkerBase):
         TODO(gongshaotian):The scheduler should schedule the handling of prefill,
         and workers and modelrunners should not perceive it.
         """
-        self.model_runner.insert_prefill_inputs(req_dicts=req_dicts)
+        if envs.ENABLE_V1_KVCACHE_SCHEDULER:
+            self.model_runner.insert_tasks_v1(req_dicts=req_dicts)
+        else:
+            self.model_runner.insert_prefill_inputs(req_dicts=req_dicts)
 
     def graph_optimize_and_warm_up_model(self) -> None:
         """
         Perform the warm-up and the graph optimization
         """
+        if self.model_runner.graph_opt_level >= 1:
+            self.model_runner.sot_warmup()
         # Triger cuda grpah capture
         self.model_runner.capture_model()
 
