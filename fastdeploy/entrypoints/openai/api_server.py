@@ -119,8 +119,8 @@ async def lifespan(app: FastAPI):
         args.data_parallel_size,
     )
     app.state.dynamic_load_weight = args.dynamic_load_weight
-    chat_handler = OpenAIServingChat(engine_client, pid, args.dist_init_ip, args.tool_call_parser)
-    completion_handler = OpenAIServingCompletion(engine_client, pid, args.dist_init_ip)
+    chat_handler = OpenAIServingChat(engine_client, pid, args.tool_call_parser)
+    completion_handler = OpenAIServingCompletion(engine_client, pid)
     engine_client.create_zmq_client(model=pid, mode=zmq.PUSH)
     engine_client.pid = pid
     app.state.engine_client = engine_client
