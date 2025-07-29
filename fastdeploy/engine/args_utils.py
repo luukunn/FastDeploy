@@ -46,6 +46,10 @@ class EngineArgs:
     """
     The name or path of the model to be used.
     """
+    revision: Optional[str] = "master"
+    """
+    The revision for downloading models.
+    """
     model_config_name: Optional[str] = "config.json"
     """
     The name of the model configuration file.
@@ -142,19 +146,14 @@ class EngineArgs:
     Ratio of tokens to process in a block.
     """
 
-    dist_init_ip: Optional[str] = None
+    prealloc_dec_block_slot_num_threshold: int = 5
     """
-    The master node ip of multinode deployment
+    Token slot threshold for preallocating decoder blocks.
     """
+    ips: Optional[List[str]] = None
+    """
+    The ips of multinode deployment
 
-    nnodes: int = 1
-    """
-    The number of nodes in multinode deployment
-    """
-
-    node_rank: int = 0
-    """
-    The rank of the current node in multinode deployment
     """
 
     swap_space: float = None
@@ -346,6 +345,12 @@ class EngineArgs:
             type=str,
             default=EngineArgs.model,
             help="Model name or path to be used.",
+        )
+        model_group.add_argument(
+            "--revision",
+            type=nullable_str,
+            default=EngineArgs.revision,
+            help="Revision for downloading models",
         )
         model_group.add_argument(
             "--model-config-name",
@@ -557,10 +562,14 @@ class EngineArgs:
         )
 
         cache_group.add_argument(
-            "--swap-space",
-            type=float,
-            default=EngineArgs.swap_space,
-            help="The amount of CPU memory to offload to.",
+            "--swap-space", type=float, default=EngineArgs.swap_space, help="The amount of CPU memory to offload to."
+        )
+
+        cache_group.add_argument(
+            "--prealloc-dec-block-slot-num-threshold",
+            type=int,
+            default=5,
+            help="Number of token slot threadshold to allocate next blocks for decoding.",
         )
 
         cache_group.add_argument(
@@ -579,23 +588,10 @@ class EngineArgs:
         # Cluster system parameters group
         system_group = parser.add_argument_group("System Configuration")
         system_group.add_argument(
-            "--dist-init-ip",
-            default=EngineArgs.dist_init_ip,
-            help="IP addresses of master node.",
-        )
-
-        system_group.add_argument(
-            "--nnodes",
-            type=int,
-            default=EngineArgs.nnodes,
-            help="The number of all nodes.",
-        )
-
-        system_group.add_argument(
-            "--node-rank",
-            type=int,
-            default=EngineArgs.node_rank,
-            help="node rank id (range [0, nnodes)).",
+            "--ips",
+            type=lambda s: s.split(",") if s else None,
+            default=EngineArgs.ips,
+            help="IP addresses of all nodes participating in distributed inference.",
         )
 
         # Performance tuning parameters group
@@ -816,6 +812,7 @@ class EngineArgs:
             gpu_memory_utilization=self.gpu_memory_utilization,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             kv_cache_ratio=self.kv_cache_ratio,
+            prealloc_dec_block_slot_num_threshold=self.prealloc_dec_block_slot_num_threshold,
             enable_prefix_caching=self.enable_prefix_caching,
             swap_space=self.swap_space,
             cache_queue_port=self.cache_queue_port,
@@ -911,9 +908,7 @@ class EngineArgs:
             max_num_seqs=self.max_num_seqs,
             speculative_config=speculative_cfg,
             max_num_batched_tokens=self.max_num_batched_tokens,
-            dist_init_ip=self.dist_init_ip,
-            nnodes=self.nnodes,
-            node_rank=self.node_rank,
+            ips=self.ips,
             use_warmup=self.use_warmup,
             engine_worker_queue_port=self.engine_worker_queue_port,
             limit_mm_per_prompt=self.limit_mm_per_prompt,

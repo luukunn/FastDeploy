@@ -6,7 +6,6 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-#dist_init_ip
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -27,7 +26,6 @@ from fastdeploy.utils import (
     ceil_div,
     check_unified_ckpt,
     get_host_ip,
-    get_random_port,
     is_port_available,
     llm_logger,
 )
@@ -171,6 +169,7 @@ class CacheConfig:
         Overrides profiled num_gpu_blocks if provided.
         kv_cache_ratio (float): Ratio for calculating the maximum block number.
         enc_dec_block_num (int): Number of encoder-decoder blocks.
+        prealloc_dec_block_slot_num_threshold (int): Number of token slot threadshold to allocate next blocks for decoding.
         enable_prefix_caching (bool): Flag to enable prefix caching.
     """
 
@@ -183,6 +182,7 @@ class CacheConfig:
         swap_space: Optional[int] = None,
         kv_cache_ratio: float = 0.75,
         enc_dec_block_num: int = 2,
+        prealloc_dec_block_slot_num_threshold: int = 5,
         tensor_parallel_size: int = 1,
         enable_prefix_caching=False,
         enable_ssd_cache=False,
@@ -204,6 +204,7 @@ class CacheConfig:
             num_cpu_blocks (Optional[int]): Number of CPU blocks.
             kv_cache_ratio (float): Ratio for max block calculation.
             enc_dec_block_num (int): Number of encoder-decoder blocks.
+            prealloc_dec_block_slot_num_threshold (int): Number of token slot threadshold to allocate next blocks for decoding, used when ENABLE_V1_KVCACHE_SCHEDULER=1.
             enable_prefix_caching (bool): Enable prefix caching.
         """
         self.block_size = block_size
@@ -211,6 +212,7 @@ class CacheConfig:
         self.num_gpu_blocks_override = num_gpu_blocks_override
         self.kv_cache_ratio = kv_cache_ratio
         self.enc_dec_block_num = enc_dec_block_num
+        self.prealloc_dec_block_slot_num_threshold = prealloc_dec_block_slot_num_threshold
         self.cache_dtype = cache_dtype
         if hasattr(model_cfg, "quantization_config"):
             self.cache_dtype = model_cfg.quantization_config.get("kv_cache_quant_type", cache_dtype)
@@ -429,6 +431,7 @@ class GraphOptimizationConfig:
         graph_opt_level: Optional[int] = 0,
         use_cudagraph: Optional[bool] = None,
         cudagraph_capture_sizes: Optional[List[int]] = None,
+        sot_warmup_sizes: Optional[List[int]] = None,
         **kwargs,
     ):
         """
@@ -444,6 +447,7 @@ class GraphOptimizationConfig:
         self.graph_opt_level = graph_opt_level
         self.use_cudagraph = use_cudagraph
         self.cudagraph_capture_sizes = cudagraph_capture_sizes
+        self.sot_warmup_sizes = [] if sot_warmup_sizes is None else sot_warmup_sizes
 
     def to_json_string(self):
         """
@@ -638,9 +642,7 @@ class Config:
         max_model_len: int = 8192,
         max_num_seqs: int = 8,
         max_num_batched_tokens: Optional[int] = None,
-        dist_init_ip: str = None,
-        nnodes: int = 1,
-        node_rank: int = 0,
+        ips: str = None,
         speculative_config: Optional[Dict[str, Any]] = None,
         graph_optimization_config: Optional[Dict[str, Any]] = None,
         use_warmup: bool = False,
@@ -695,15 +697,25 @@ class Config:
         self.tokenizer = tokenizer
         self.max_num_batched_tokens = max_num_batched_tokens
         self.tensor_parallel_size = tensor_parallel_size
-        self.dist_init_ip = dist_init_ip
+        self.ips = ips
 
-        self.nnode = nnodes
-        self.node_rank = node_rank
-        if self.dist_init_ip is None:
+        if self.ips is None:
             self.master_ip = "0.0.0.0"
+        elif isinstance(self.ips, list):
+            self.master_ip = self.ips[0]
         else:
-            self.master_ip = self.dist_init_ip
-            self.dist_init_addr = f"{self.dist_init_ip}:{get_random_port()}"
+            self.ips = self.ips.split(",")
+            self.master_ip = self.ips[0]
+
+        if self.ips is None:
+            self.nnode = 1
+            self.node_rank = 0
+        else:
+            self.nnode = len(self.ips)
+
+            for idx, ip in enumerate(self.ips):
+                if ip == self.master_ip:
+                    self.node_rank = idx
 
         self.max_model_len = max_model_len
         self.max_num_seqs = max_num_seqs
@@ -767,14 +779,11 @@ class Config:
             self.device_ids.split(",").__len__() == self.worker_num_per_node
         ), f"invalid CUDA_VISIBLE_DEVICES, should be equal to {self.worker_num_per_node}"
 
-        assert (
-            self.worker_num_per_node % self.tensor_parallel_size == 0
-        ), f"tensor_parallel_size: {self.tensor_parallel_size} should be divisible by worker_num_per_node: {self.worker_num_per_node}"
         self.local_device_ids = self.device_ids.split(",")[: self.tensor_parallel_size]
 
         self.host_ip = get_host_ip()
 
-        if self.dist_init_ip is None or self.host_ip == self.master_ip:
+        if self.ips is None or self.host_ip == self.master_ip:
             self.is_master = True
         else:
             self.is_master = False
@@ -811,9 +820,6 @@ class Config:
         assert is_port_available(
             "0.0.0.0", self.engine_worker_queue_port
         ), f"The parameter `engine_worker_queue_port`:{self.engine_worker_queue_port} is already in use."
-        assert (
-            self.max_chips_per_node >= self.tensor_parallel_size > 0
-        ), f"tensor_parallel_size: {self.tensor_parallel_size} should be between 1 and {self.max_chips_per_node}"
         assert self.nnode >= 1, f"nnode: {self.nnode} should no less than 1"
         assert self.max_model_len >= 16, f"max_model_len: {self.max_model_len} should be larger than 16"
         assert self.max_num_seqs >= 1, f"max_num_seqs: {self.max_num_seqs} should be larger than 1"

@@ -106,6 +106,8 @@ class ModelConfig:
         self.dtype = ""
         self.enable_logprob = False
         self.enable_mm = False
+        self.enable_redundant_experts = False
+        self.redundant_experts_num = 0
 
         for key, value in args.items():
             if hasattr(self, key):
@@ -319,6 +321,8 @@ class GraphOptimizationConfig:
         - With dyncmic graph backend: ...
         - With static grpah backend: WIP
     """
+    sot_warmup_sizes: Optional[list[int]] = field(default_factory=list)
+    """  Number of warmup runs for SOT warmup. """
     use_cudagraph: bool = False
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from llm config.
