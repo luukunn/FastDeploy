@@ -50,7 +50,7 @@ class OpenAIServingChat:
     OpenAI-style chat completions serving
     """
 
-    def __init__(self, engine_client, pid, tool_parser):
+    def __init__(self, engine_client, pid, ips, tool_parser):
         self.engine_client = engine_client
         self.pid = pid
         self.master_ip = ips
