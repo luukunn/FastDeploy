@@ -76,7 +76,7 @@ class ErnieToolParser(ToolParser):
             # Tool Call
             dec = JSONDecoder()
             function_call_arr = []
-
+            
             # depending on the prompt format the Llama model may or may not
             # prefix the output with the <|python_tag|> token
             start_idx = 0
@@ -129,7 +129,10 @@ class ErnieToolParser(ToolParser):
             return None
         current_text = current_text.strip()
         if not current_text.startswith('[{'):
-            return DeltaMessage(content=delta_text)
+            if len(current_text) == 2 and current_text[0] == '[':
+                return DeltaMessage(content=current_text)
+            else:
+                return DeltaMessage(content=delta_text)
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
         # sent yet, don't allow sending
@@ -201,6 +204,13 @@ class ErnieToolParser(ToolParser):
                             delta = None
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
+                    elif cur_arguments is not None and current_text.endswith("}"):
+                        delta = DeltaMessage(tool_calls=[
+                            DeltaToolCall(index=self.current_tool_id,
+                                          function=DeltaFunctionCall(
+                                              arguments="{}").
+                                          model_dump(exclude_none=True))
+                        ])
                     else:
                         delta = None
                 else:
@@ -264,6 +274,13 @@ class ErnieToolParser(ToolParser):
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
+                elif cur_arguments is not None and current_text.endswith("}"):
+                    delta = DeltaMessage(tool_calls=[
+                            DeltaToolCall(index=self.current_tool_id,
+                                          function=DeltaFunctionCall(
+                                              arguments="{}").
+                                          model_dump(exclude_none=True))
+                        ])
 
             self.prev_tool_call_arr = tool_call_arr
             return delta
