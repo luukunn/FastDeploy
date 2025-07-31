@@ -64,27 +64,14 @@ class ErnieToolParser(ToolParser):
         """
         Extract the tool calls from a complete model response.
         """
-        # case -- if a tool call token is not present, return a text response
-        model_output = model_output.strip("[]")
-        if not model_output.startswith('{'):
+        model_output = model_output.strip()
+        if not model_output.startswith('[{'):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
 
         try:
-            # load the JSON, and then use it to build the Function and
-            # Tool Call
-            dec = JSONDecoder()
-            function_call_arr = []
-            
-            # depending on the prompt format the Llama model may or may not
-            # prefix the output with the <|python_tag|> token
-            start_idx = 0
-            while start_idx < len(model_output):
-                (obj, end_idx) = dec.raw_decode(model_output[start_idx:])
-                start_idx += end_idx + len(',')
-                function_call_arr.append(obj)
-
+            function_call_arr = json.loads(model_output)
             tool_calls: list[ToolCall] = [
                 ToolCall(
                     type="function",
@@ -92,9 +79,7 @@ class ErnieToolParser(ToolParser):
                     function=FunctionCall(
                         name=raw_function_call["name"],
                         # function call args are JSON but as a string
-                        arguments=json.dumps(raw_function_call["arguments"] \
-                                if "arguments" in raw_function_call \
-                                else raw_function_call["parameters"],
+                        arguments=json.dumps(raw_function_call["arguments"],
                                 ensure_ascii=False)))
                 for raw_function_call in function_call_arr
             ]
