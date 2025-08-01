@@ -107,12 +107,11 @@ class ErnieToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: dict,
     ) -> Union[DeltaMessage, None]:
-        if request.get("finished", False) and delta_text == "]":
-            return None
 
         if len(current_text.strip()) == 0 or (len(current_text.strip()) == 1 and current_text) == '[':
             return None
-        current_text = current_text.strip()
+        
+        current_text = current_text.lstrip()
         if not current_text.startswith('[{'):
             if len(current_text) == 2 and current_text[0] == '[':
                 return DeltaMessage(content=current_text)
@@ -189,7 +188,7 @@ class ErnieToolParser(ToolParser):
                             delta = None
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
-                    elif cur_arguments is not None and current_text.endswith("}"):
+                    elif cur_arguments is not None and current_text.endswith("\"arguments\":{}"):
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
@@ -259,7 +258,7 @@ class ErnieToolParser(ToolParser):
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
-                elif cur_arguments is not None and current_text.endswith("}"):
+                elif cur_arguments is not None and current_text.endswith("\"arguments\":{}"):
                     delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
