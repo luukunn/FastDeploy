@@ -108,6 +108,9 @@ class ErnieToolParser(ToolParser):
         request: dict,
     ) -> Union[DeltaMessage, None]:
 
+        if delta_text == ']' and is_complete_json(current_text):
+            return None
+
         if len(current_text.strip()) == 0 or (len(current_text.strip()) == 1 and current_text) == '[':
             return None
         
