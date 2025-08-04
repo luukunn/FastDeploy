@@ -113,18 +113,18 @@ class ErnieToolParser(ToolParser):
         request: dict,
     ) -> Union[DeltaMessage, None]:
 
-        if delta_text == ']' and is_complete_json(current_text):
-            return None
-
         if len(current_text.strip()) == 0 or (len(current_text.strip()) == 1 and current_text) == '[':
             return None
         
         current_text = current_text.lstrip()
         if not current_text.startswith('[{'):
-            if len(current_text) == 2 and current_text[0] == '[':
+            if len(current_token_ids) == 2 and current_text[0] == '[':
                 return DeltaMessage(content=current_text)
             else:
                 return DeltaMessage(content=delta_text)
+        
+        if delta_text == ']' and is_complete_json(current_text):
+            return None
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
         # sent yet, don't allow sending
