@@ -196,13 +196,15 @@ class ErnieToolParser(ToolParser):
                             delta = None
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
-                    elif cur_arguments is not None and current_text.endswith("\"arguments\":{}"):
-                        delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments="{}").
-                                          model_dump(exclude_none=True))
-                        ])
+                    elif cur_arguments is not None:
+                        partten = r'"arguments"\s*:\s*\{\s*\}$'
+                        if re.search(partten, current_text):
+                            delta = DeltaMessage(tool_calls=[
+                                DeltaToolCall(index=self.current_tool_id,
+                                            function=DeltaFunctionCall(
+                                                arguments="{}").
+                                            model_dump(exclude_none=True))
+                            ])
                     else:
                         delta = None
                 else:
@@ -266,12 +268,14 @@ class ErnieToolParser(ToolParser):
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
-                elif cur_arguments is not None and current_text.endswith("\"arguments\":{}"):
-                    delta = DeltaMessage(tool_calls=[
+                elif cur_arguments is not None:
+                    partten = r'"arguments"\s*:\s*\{\s*\}$'
+                    if re.search(partten, current_text):
+                        delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments="{}").
-                                          model_dump(exclude_none=True))
+                                        function=DeltaFunctionCall(
+                                            arguments="{}").
+                                        model_dump(exclude_none=True))
                         ])
 
             self.prev_tool_call_arr = tool_call_arr
