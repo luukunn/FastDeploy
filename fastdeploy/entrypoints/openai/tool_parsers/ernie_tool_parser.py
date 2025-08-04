@@ -15,6 +15,7 @@
 """
 
 import json
+import re
 from collections.abc import Sequence
 from json import JSONDecoder
 from typing import Union
@@ -64,25 +65,29 @@ class ErnieToolParser(ToolParser):
         """
         Extract the tool calls from a complete model response.
         """
-        model_output = model_output.strip()
-        if not model_output.startswith('[{'):
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
 
         try:
+            tool_calls = []
             function_call_arr = json.loads(model_output)
-            tool_calls: list[ToolCall] = [
-                ToolCall(
-                    type="function",
-                    id=random_tool_call_id(),
-                    function=FunctionCall(
-                        name=raw_function_call["name"],
-                        # function call args are JSON but as a string
-                        arguments=json.dumps(raw_function_call["arguments"],
-                                ensure_ascii=False)))
-                for raw_function_call in function_call_arr
-            ]
+            if isinstance(function_call_arr, list):
+                for tool_call in function_call_arr:
+                    if "name" in tool_call and "arguments" in tool_call:
+                        tool_calls.append(
+                            ToolCall(
+                                type="function",
+                                id=random_tool_call_id(),
+                                function=FunctionCall(
+                                    name=tool_call["name"],
+                                    # function call args are JSON but as a string
+                                    arguments=json.dumps(tool_call["arguments"],
+                                            ensure_ascii=False)))
+                        )
+                if len(tool_calls) == 0:
+                    return ExtractedToolCallInformation(tools_called=False,
+                                                content=model_output)
+            else:
+                return ExtractedToolCallInformation(tools_called=False,
+                                                content=model_output)
 
             # get any content before  the tool call
             ret = ExtractedToolCallInformation(tools_called=True,
@@ -94,7 +99,7 @@ class ErnieToolParser(ToolParser):
             data_processor_logger.error("Error in extracting tool call from response.")
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
+                                                tool_calls=None,
                                                 content=model_output)
 
     def extract_tool_calls_streaming(
