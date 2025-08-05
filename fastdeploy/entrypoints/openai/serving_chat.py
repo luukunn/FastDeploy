@@ -250,28 +250,29 @@ class OpenAIServingChat:
                         )
 
                     previous_num_tokens += len(output["token_ids"])
-                    tool_delta_message = output["tool_delta_message"]
-                    if tool_delta_message is None:
-                        if res["finished"]:
-                            delta_message = DeltaMessage(
-                                content=delta_text, 
-                                reasoning_content=output.get("reasoning_content"), \
-                                prompt_token_ids=None,
-                                completion_token_ids=None, 
-                                tool_calls=output.get("tool_call_content", []),
-                            )
+                    if tool_parser:
+                        tool_delta_message = output["tool_delta_message"]
+                        if tool_delta_message is None:
+                            if res["finished"]:
+                                delta_message = DeltaMessage(
+                                    content=delta_text, 
+                                    reasoning_content=output.get("reasoning_content"), \
+                                    prompt_token_ids=None,
+                                    completion_token_ids=None, 
+                                    tool_calls=output.get("tool_call_content", []),
+                                )
+                            else:
+                                continue
                         else:
-                            continue
-                    elif tool_delta_message == False or (tool_delta_message and tool_delta_message.content != None):
-                        delta_message = DeltaMessage(
-                            content=delta_text, 
-                            reasoning_content=output.get("reasoning_content"), \
-                            prompt_token_ids=None,
-                            completion_token_ids=None, 
-                            tool_calls=output.get("tool_call_content", []),
-                        )
+                            delta_message = tool_delta_message
                     else:
-                        delta_message = tool_delta_message
+                        delta_message = DeltaMessage(
+                        content=delta_text,
+                        reasoning_content=output.get("reasoning_content"),
+                        prompt_token_ids=None,
+                        completion_token_ids=None,
+                        tool_calls=None,
+                    )
 
                     choice = ChatCompletionResponseStreamChoice(
                         index=0,
