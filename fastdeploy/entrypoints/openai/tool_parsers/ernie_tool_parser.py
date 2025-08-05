@@ -197,7 +197,7 @@ class ErnieToolParser(ToolParser):
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
                     elif cur_arguments is not None:
-                        partten = r'"arguments"\s*:\s*\{\s*\}\}$|"arguments"\s*:\s*\{\s*\}$'
+                        partten = r'"arguments"\s*:\s*\{\s*\}\}$'
                         if re.search(partten, current_text):
                             delta = DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=self.current_tool_id,
@@ -269,7 +269,7 @@ class ErnieToolParser(ToolParser):
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
                 elif cur_arguments is not None:
-                    partten = r'"arguments"\s*:\s*\{\s*\}\}$|"arguments"\s*:\s*\{\s*\}$'
+                    partten = r'"arguments"\s*:\s*\{\s*\}\}$'
                     if re.search(partten, current_text):
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
