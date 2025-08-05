@@ -353,7 +353,7 @@ class ErnieProcessor(BaseDataProcessor):
 
         prefix_offset = self.decode_status[task_id][0]
         read_offset = self.decode_status[task_id][1]
-        previous_token_ids = self.decode_status[task_id][2]
+        previous_token_ids = self.decode_status[task_id][2].copy()
         previous_texts = self.decode_status[task_id][3]
         decode_str, prefix_offset, read_offset = self.tokenizer.decode_token(
             previous_token_ids + token_id, prefix_offset, read_offset

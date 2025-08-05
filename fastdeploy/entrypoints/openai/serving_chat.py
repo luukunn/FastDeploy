@@ -250,18 +250,9 @@ class OpenAIServingChat:
                         )
 
                     previous_num_tokens += len(output["token_ids"])
-                    if tool_parser:
+                    if tool_parser and not res["finished"]:
                         tool_delta_message = output["tool_delta_message"]
                         if tool_delta_message is None:
-                            if res["finished"]:
-                                delta_message = DeltaMessage(
-                                    content=delta_text, 
-                                    reasoning_content=output.get("reasoning_content"), \
-                                    prompt_token_ids=None,
-                                    completion_token_ids=None, 
-                                    tool_calls=output.get("tool_call_content", []),
-                                )
-                            else:
                                 continue
                         else:
                             delta_message = tool_delta_message
