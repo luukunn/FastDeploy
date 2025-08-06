@@ -294,7 +294,7 @@ class ErnieProcessor(BaseDataProcessor):
         if is_end:
             data_processor_logger.info(f"req_id:{req_id}, decode_status: {self.decode_status[req_id]}")
             del self.decode_status[req_id]
-        if tool_parser:
+        if tool_parser and not is_end:
             tool_call = tool_parser.extract_tool_calls_streaming(
                 previous_texts,
                 previous_texts + delta_text,
