@@ -58,6 +58,7 @@ class ErnieToolParser(ToolParser):
         self.current_tool_name_sent: bool = False
         self.streamed_args_for_tool: list[str] = []  # map what has been streamed for each tool so far to a list
         self.bot_token = "["
+        self.current_empty_fc = False
 
     def extract_tool_calls(
             self, model_output: str,
@@ -197,14 +198,16 @@ class ErnieToolParser(ToolParser):
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
                     elif cur_arguments is not None:
-                        partten = r'"arguments"\s*:\s*\{\s*\}\}$|"arguments"\s*:\s*\{\s*\}$'
-                        if re.search(partten, current_text):
+                        partten = r'"arguments"\s*:\s*\{\s*\}'
+                        if re.search(partten, current_text) and not self.current_empty_fc:
                             delta = DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=self.current_tool_id,
                                             function=DeltaFunctionCall(
                                                 arguments="{}").
                                             model_dump(exclude_none=True))
                             ])
+                        else:
+                            delta = None
                     else:
                         delta = None
                 else:
@@ -213,6 +216,7 @@ class ErnieToolParser(ToolParser):
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
+                self.current_empty_fc = False
                 data_processor_logger.debug("starting on new tool %d", self.current_tool_id)
                 return delta
 
@@ -269,14 +273,15 @@ class ErnieToolParser(ToolParser):
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
                 elif cur_arguments is not None:
-                    partten = r'"arguments"\s*:\s*\{\s*\}\}$|"arguments"\s*:\s*\{\s*\}$'
-                    if re.search(partten, current_text):
+                    partten = r'"arguments"\s*:\s*\{\s*\}'
+                    if re.search(partten, current_text) and not self.current_empty_fc:
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(index=self.current_tool_id,
                                         function=DeltaFunctionCall(
                                             arguments="{}").
                                         model_dump(exclude_none=True))
                         ])
+                        self.current_empty_fc = True
 
             self.prev_tool_call_arr = tool_call_arr
             return delta
