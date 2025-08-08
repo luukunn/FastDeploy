@@ -118,8 +118,10 @@ def partial_json_loads(input_str: str, flags: Allow) -> tuple[Any, int]:
         return (partial_json_parser.loads(input_str, flags), len(input_str))
     except JSONDecodeError as e:
         if "Extra data" in e.msg:
+            input_str_lstripped = input_str.lstrip()
             dec = JSONDecoder()
-            return dec.raw_decode(input_str)
+            obj, end_idx = dec.raw_decode(input_str_lstripped)
+            return obj, end_idx + len(input_str) - len(input_str_lstripped)
         raise
 
 
