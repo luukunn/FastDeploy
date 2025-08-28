@@ -269,7 +269,11 @@ class OpenAIServingChat:
                         first_iteration = False
 
                     output = res["outputs"]
+                    if output["is_buffering"]:
+                        continue
                     delta_text = output["text"]
+                    reasoning_content = output["reasoning_content"]
+                    tool_calls = output["tool_calls"]
                     output_top_logprobs = output["top_logprobs"]
                     previous_num_tokens += len(output["token_ids"])
                     logprobs_res: Optional[LogProbs] = None
@@ -277,21 +281,13 @@ class OpenAIServingChat:
                         logprobs_res = self._create_chat_logprobs(
                             output_top_logprobs, request.logprobs, request.top_logprobs
                         )
-
                     delta_message = DeltaMessage(
                         content=delta_text,
-                        reasoning_content="",
+                        reasoning_content=reasoning_content,
                         prompt_token_ids=None,
                         completion_token_ids=None,
-                        tool_calls=None,
+                        tool_calls=tool_calls,
                     )
-                    if not res["finished"] and "delta_message" in output:
-                        delta_message_output = output["delta_message"]
-                        if delta_message_output is None:
-                            continue
-                        delta_message.content = delta_message_output.content or ""
-                        delta_message.reasoning_content = delta_message_output.reasoning_content or ""
-                        delta_message.tool_calls = delta_message_output.tool_calls
 
                     choice = ChatCompletionResponseStreamChoice(
                         index=0,
@@ -299,6 +295,8 @@ class OpenAIServingChat:
                         logprobs=logprobs_res,
                         arrival_time=arrival_time,
                     )
+                    if tool_calls:
+                        tool_called = True
                     if res["finished"]:
                         num_choices -= 1
                         work_process_metrics.e2e_request_latency.observe(

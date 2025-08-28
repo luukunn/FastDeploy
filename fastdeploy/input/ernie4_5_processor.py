@@ -324,6 +324,10 @@ class Ernie4_5Processor(BaseDataProcessor):
                 token_ids = token_ids[:-1]
         delta_text, previous_token_ids, previous_texts = self.ids2tokens(token_ids, req_id)
         response_dict["outputs"]["raw_prediction"] = delta_text
+        response_dict["outputs"]["text"] = delta_text
+        response_dict["outputs"]["reasoning_content"] = ""
+        response_dict["outputs"]["is_buffering"] = False
+        response_dict["outputs"]["tool_calls"] = None
         if (
             self.reasoning_parser
             and req_id not in self.reasoning_end_dict
@@ -337,7 +341,11 @@ class Ernie4_5Processor(BaseDataProcessor):
                 previous_token_ids + token_ids,
                 token_ids,
             )
-            response_dict["outputs"]["delta_message"] = reasoning_delta_message
+            if reasoning_delta_message:
+                response_dict["outputs"]["text"] = reasoning_delta_message.content
+                response_dict["outputs"]["reasoning_content"] = reasoning_delta_message.reasoning_content
+            else:
+                response_dict["outputs"]["continue"] = True
         if self.tool_parser_obj:
             if req_id not in self.tool_parser_dict:
                 self.tool_parser_dict[req_id] = self.tool_parser_obj(self.tokenizer)
@@ -351,9 +359,11 @@ class Ernie4_5Processor(BaseDataProcessor):
                 token_ids,
                 response_dict,
             )
-            if tool_call_delta_message is None or tool_call_delta_message.tool_calls:
-                response_dict["outputs"]["delta_message"] = tool_call_delta_message
-        response_dict["outputs"]["text"] = delta_text
+            if tool_call_delta_message:
+                response_dict["outputs"]["text"] = tool_call_delta_message.content
+                response_dict["outputs"]["tool_call"] = tool_call_delta_message.tool_calls
+            else:
+                response_dict["outputs"]["continue"] = True
         if is_end:
             data_processor_logger.info(f"req_id:{req_id}, decode_status: {self.decode_status[req_id]}")
             del self.decode_status[req_id]

@@ -378,6 +378,11 @@ class OpenAIServingCompletion:
 
                     await self._echo_back_prompt(request, res, idx)
                     output = res["outputs"]
+                    if output["is_buffering"]:
+                        continue
+                    delta_text = output["text"]
+                    reasoning_content = output["reasoning_content"]
+                    tool_calls = output["tool_calls"]
                     output_top_logprobs = output["top_logprobs"]
                     logprobs_res: Optional[CompletionLogprobs] = None
                     if request.logprobs and output_top_logprobs is not None:
@@ -386,23 +391,18 @@ class OpenAIServingCompletion:
                     output_tokens[idx] += 1
                     delta_message = CompletionResponseStreamChoice(
                         index=idx,
-                        text=output["text"],
+                        text=delta_text,
                         prompt_token_ids=None,
                         completion_token_ids=output.get("token_ids") if request.return_token_ids else None,
-                        tool_calls=None,
+                        tool_calls=tool_calls,
                         raw_prediction=output.get("raw_prediction") if request.return_token_ids else None,
                         completion_tokens=output.get("raw_prediction") if request.return_token_ids else None,
-                        reasoning_content="",
+                        reasoning_content=reasoning_content,
                         arrival_time=arrival_time,
                         logprobs=logprobs_res,
                     )
-                    if not res["finished"] and "delta_message" in output:
-                        delta_message_output = output["delta_message"]
-                        if delta_message_output is None:
-                            continue
-                        delta_message.text = delta_message_output.content or ""
-                        delta_message.reasoning_content = delta_message_output.reasoning_content or ""
-                        delta_message.tool_calls = delta_message_output.tool_calls
+                    if tool_calls:
+                        tool_called[idx] = True
 
                     choices.append(delta_message)
 
