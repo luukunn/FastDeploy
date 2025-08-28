@@ -330,8 +330,8 @@ class Ernie4_5Processor(BaseDataProcessor):
         response_dict["outputs"]["tool_calls"] = None
         if (
             self.reasoning_parser
-            and req_id not in self.reasoning_end_dict
             and (enable_thinking or self.reasoning_parser.__class__.__name__ == "ErnieX1ReasoningParser")
+            and not is_end
         ):
             reasoning_delta_message = self.reasoning_parser.extract_reasoning_content_streaming(
                 previous_texts,
@@ -342,11 +342,11 @@ class Ernie4_5Processor(BaseDataProcessor):
                 token_ids,
             )
             if reasoning_delta_message:
-                response_dict["outputs"]["text"] = reasoning_delta_message.content
-                response_dict["outputs"]["reasoning_content"] = reasoning_delta_message.reasoning_content
+                response_dict["outputs"]["text"] = reasoning_delta_message.content or ""
+                response_dict["outputs"]["reasoning_content"] = reasoning_delta_message.reasoning_content or ""
             else:
-                response_dict["outputs"]["continue"] = True
-        if self.tool_parser_obj:
+                response_dict["outputs"]["is_buffering"] = True
+        if self.tool_parser_obj and not is_end:
             if req_id not in self.tool_parser_dict:
                 self.tool_parser_dict[req_id] = self.tool_parser_obj(self.tokenizer)
             tool_parser = self.tool_parser_dict[req_id]
@@ -360,10 +360,12 @@ class Ernie4_5Processor(BaseDataProcessor):
                 response_dict,
             )
             if tool_call_delta_message:
-                response_dict["outputs"]["text"] = tool_call_delta_message.content
-                response_dict["outputs"]["tool_call"] = tool_call_delta_message.tool_calls
+                if tool_call_delta_message.tool_calls:
+                    response_dict["outputs"]["tool_calls"] = tool_call_delta_message.tool_calls
+                    response_dict["outputs"]["text"] = ""
+                    response_dict["outputs"]["is_buffering"] = False
             else:
-                response_dict["outputs"]["continue"] = True
+                response_dict["outputs"]["is_buffering"] = True
         if is_end:
             data_processor_logger.info(f"req_id:{req_id}, decode_status: {self.decode_status[req_id]}")
             del self.decode_status[req_id]

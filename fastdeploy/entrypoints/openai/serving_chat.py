@@ -269,8 +269,6 @@ class OpenAIServingChat:
                         first_iteration = False
 
                     output = res["outputs"]
-                    if output["is_buffering"]:
-                        continue
                     delta_text = output["text"]
                     reasoning_content = output["reasoning_content"]
                     tool_calls = output["tool_calls"]
@@ -281,6 +279,8 @@ class OpenAIServingChat:
                         logprobs_res = self._create_chat_logprobs(
                             output_top_logprobs, request.logprobs, request.top_logprobs
                         )
+                    if output["is_buffering"]:
+                        continue
                     delta_message = DeltaMessage(
                         content=delta_text,
                         reasoning_content=reasoning_content,
