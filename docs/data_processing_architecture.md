@@ -1,8 +1,12 @@
 # vLLM 数据处理架构调研文档
 
+> 基于 commit `34d317dcec3935e588d6c8ee8a7a57abb7a3e731` 分析，以 `/v1/chat/completions` 接口为主线。
+
 ## 1. 概述
 
-vLLM 的数据处理架构负责将用户通过 OpenAI 兼容 API 发送的请求（包含文本、图片、音频等多模态内容），转换为引擎可直接消费的 token 化输入。整个流程分为 **API 层预处理**、**渲染层模板处理**、**多模态处理** 和 **引擎提交** 四大阶段，涉及 vLLM 内部多个子系统以及 HuggingFace `transformers` 库的深度集成。
+vLLM 的数据处理架构负责将用户通过 OpenAI 兼容 API 发送的请求（包含文本、图片、音频等多模态内容），转换为引擎可直接消费的 token 化输入。整个流程分为 **API 层**、**Render 服务层**、**Renderer 渲染层**、**多模态处理层** 和 **引擎提交** 五大阶段。
+
+关键设计：`OpenAIServingChat` 并不直接处理消息渲染和 tokenization，而是委托给 `OpenAIServingRender`；后者再调用 `BaseRenderer` 完成底层的模板渲染、tokenization 和多模态处理。
 
 ---
 
@@ -10,42 +14,54 @@ vLLM 的数据处理架构负责将用户通过 OpenAI 兼容 API 发送的请�
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                           用户请求 (ChatCompletionRequest)                    │
-│        messages: [{role, content: [text, image_url, ...]}], tools, ...       │
-└───────────────────────────────────┬──────────────────────────────────────────┘
-                                    │
-                                    ▼
+│                       用户请求 (ChatCompletionRequest)                        │
+│      messages: [{role, content: [text, image_url, ...]}], tools, ...         │
+└──────────────────────────────────┬───────────────────────────────────────────┘
+                                   │
+                                   ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  API 层 (serving.py)                                                         │
-│  OpenAIServingChat.create_chat_completion()                                  │
-│  ├── 模型校验、引擎健康检查                                                     │
-│  ├── 推理解析器初始化 (ReasoningParser)                                        │
-│  └── 委托渲染 ──────────────────────────────────────┐                         │
-└─────────────────────────────────────────────────────┼────────────────────────┘
-                                                      │
-                                                      ▼
+│  ① API 层: OpenAIServingChat.create_chat_completion()                        │
+│     ├── 初始化 ReasoningParser                                                │
+│     ├── 调用 self.render_chat_request(request) ─────────────┐                 │
+│     │     ├── self._check_model(request)  模型校验            │                 │
+│     │     ├── self.engine_client.errored  引擎健康检查         │                 │
+│     │     └── self.openai_serving_render.render_chat(request)│                 │
+│     ├── 构建 SamplingParams                                  │                 │
+│     └── engine_client.generate(engine_prompt, ...)           │                 │
+└──────────────────────────────────────────────────────────────┼────────────────┘
+                                                               │
+                                   ┌───────────────────────────┘
+                                   ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  渲染层 (renderers/)                                                         │
-│  BaseRenderer.render_chat()                                                  │
-│  ├── Step 1: render_messages()  → 消息解析 + chat template + mm_data 提取     │
-│  ├── Step 2: tokenize_prompts() → 文本 tokenization                          │
-│  ├── Step 3: _apply_prompt_extras()                                          │
-│  └── Step 4: process_for_engine() → 多模态处理 + 组装引擎输入                   │
-└───────────────────────────────────┬──────────────────────────────────────────┘
-                                    │
-                                    ▼
+│  ② Render 服务层: OpenAIServingRender.render_chat()                          │
+│     ├── Mistral tokenizer 特殊处理                                            │
+│     ├── tool_choice / tool_parser 校验                                        │
+│     ├── validate_chat_template()                                              │
+│     └── self.preprocess_chat(request, ...)                                    │
+│           ├── 构建 ChatParams + TokenizeParams                                │
+│           └── renderer.render_chat_async([messages], chat_params, tok_params) │
+└──────────────────────────────────┬───────────────────────────────────────────┘
+                                   │
+                                   ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  多模态处理层 (multimodal/)                                                   │
-│  BaseMultiModalProcessor.apply()                                             │
-│  ├── _call_hf_processor()  → 调用 transformers ProcessorMixin                │
-│  ├── 计算 mm_placeholders（占位符位置）                                        │
-│  └── 组装 MultiModalInputs                                                   │
-└───────────────────────────────────┬──────────────────────────────────────────┘
-                                    │
-                                    ▼
+│  ③ Renderer 渲染层: BaseRenderer.render_chat_async()                         │
+│     ├── Step 1: render_messages_async()  → 消息解析+chat template+mm_data提取 │
+│     ├── Step 2: tokenize_prompts_async() → 文本 tokenization                  │
+│     ├── Step 3: _apply_prompt_extras()   → 附加 mm_processor_kwargs 等        │
+│     └── Step 4: process_for_engine_async() → 多模态处理 + 组装引擎输入         │
+└──────────────────────────────────┬───────────────────────────────────────────┘
+                                   │ (Step 4 中如果有 multi_modal_data)
+                                   ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  引擎层 (engine/)                                                            │
-│  EngineClient.generate(engine_prompt, sampling_params, ...)                  │
+│  ④ 多模态处理层: BaseMultiModalProcessor.apply()                              │
+│     ├── _call_hf_processor()  → 调用 transformers ProcessorMixin              │
+│     ├── 计算 mm_placeholders（占位符位置）                                      │
+│     └── 组装 MultiModalInputs                                                │
+└──────────────────────────────────┬───────────────────────────────────────────┘
+                                   │
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  ⑤ 引擎层: EngineClient.generate(engine_prompt, sampling_params, ...)        │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -53,44 +69,56 @@ vLLM 的数据处理架构负责将用户通过 OpenAI 兼容 API 发送的请�
 
 ## 3. 各阶段详细流程
 
-### 3.1 API 层：请求接收与校验
+### 3.1 API 层：OpenAIServingChat
 
 **入口文件**：`vllm/entrypoints/openai/chat_completion/serving.py`
 
 **核心类**：`OpenAIServingChat`（继承自 `OpenAIServing`）
 
-#### 3.1.1 初始化阶段预配置
+#### 3.1.1 初始化阶段
 
-`__init__` 中预先配置好生成过程所需的所有解析器和参数：
+`OpenAIServingChat.__init__()` 中的关键配置：
+
+```python
+class OpenAIServingChat(OpenAIServing):
+    def __init__(self, engine_client, models, response_role, *,
+                 openai_serving_render, ...):
+        self.openai_serving_render = openai_serving_render  # ★ 持有 Render 服务的引用
+        self.reasoning_parser_cls = ParserManager.get_reasoning_parser(reasoning_parser)
+        self.tool_parser = ParserManager.get_tool_parser(tool_parser, ...)
+        self.default_sampling_params = model_config.get_diff_sampling_param()
+        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        self.tool_call_id_type = get_tool_call_id_type(model_config)
+```
 
 | 配置项 | 来源 | 作用 |
 |--------|------|------|
+| `openai_serving_render` | 构造注入 | 持有 `OpenAIServingRender` 实例，**所有数据预处理委托给它** |
 | `reasoning_parser_cls` | `ParserManager.get_reasoning_parser()` | 推理/思考链解析（如 QwQ、DeepSeek-R1） |
 | `tool_parser` | `ParserManager.get_tool_parser()` | 工具调用解析（Function Calling） |
 | `default_sampling_params` | `model_config.get_diff_sampling_param()` | 从 generation_config 获取的默认采样参数 |
-| `override_max_tokens` | generation_config 或 override 配置 | max_tokens 覆盖值 |
 | `use_harmony` | `model_config.hf_config.model_type == "gpt_oss"` | GPT-OSS 模型特殊处理标志 |
 | `tool_call_id_type` | `get_tool_call_id_type(model_config)` | tool_call_id 生成策略（kimi_k2 / random） |
 
-#### 3.1.2 请求处理主流程
+#### 3.1.2 `create_chat_completion()` 主流程
 
 ```python
 async def create_chat_completion(self, request, raw_request):
     # 1. 初始化推理解析器
     reasoning_parser = self.reasoning_parser_cls(tokenizer, ...)
 
-    # 2. 渲染请求（模型校验 + 消息处理）
-    conversation, engine_prompts = await self.render_chat_request(request)
+    # 2. ★ 渲染请求 — 委托给 OpenAIServingRender
+    result = await self.render_chat_request(request)
+    conversation, engine_prompts = result
 
     # 3. 构建请求元数据
     request_id = f"chatcmpl-{self._base_request_id(...)}"
-    request_metadata = RequestResponseMetadata(request_id=request_id)
 
-    # 4. LoRA 适配器 & 模型名称
-    lora_request = self._maybe_get_adapters(request)
+    # 4. LoRA 适配器
+    lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
     model_name = self.models.model_name(lora_request)
 
-    # 5. 数据并行 rank（从 header 提取）
+    # 5. 数据并行 rank
     data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
     # 6. 构建采样参数
@@ -100,60 +128,195 @@ async def create_chat_completion(self, request, raw_request):
     # 7. 推理状态判断
     reasoning_ended = reasoning_parser.is_reasoning_end(prompt_token_ids)
 
-    # 8. 提交引擎
+    # 8. 提交引擎生成
     generator = self.engine_client.generate(
         engine_prompt, sampling_params, request_id,
         reasoning_ended=reasoning_ended, ...
     )
 ```
 
-#### 3.1.3 涉及模块
+#### 3.1.3 `render_chat_request()` — 委托链的关键
 
-| 模块路径 | 作用 |
-|----------|------|
-| `vllm.entrypoints.openai.engine.serving.OpenAIServing` | 父类，提供模型校验、适配器等基础方法 |
-| `vllm.entrypoints.openai.chat_completion.protocol` | 请求/响应协议定义，含 `to_sampling_params()` |
-| `vllm.entrypoints.openai.models.serving.OpenAIServingModels` | 模型列表与名称管理 |
-| `vllm.entrypoints.utils` | `get_max_tokens()`、`should_include_usage()` |
-| `vllm.entrypoints.chat_utils` | `ConversationMessage`、`make_tool_call_id()` 等 |
-| `vllm.parser.ParserManager` | 统一管理推理解析器和工具解析器的注册/获取 |
-| `vllm.reasoning.ReasoningParser` | 推理链解析 |
-| `vllm.tool_parsers.ToolParser` | 工具调用解析 |
-| `vllm.sampling_params` | `SamplingParams` / `BeamSearchParams` |
-| `vllm.engine.protocol.EngineClient` | 引擎客户端协议 |
+```python
+async def render_chat_request(self, request):
+    # 1. 模型校验（LoRA 等）
+    error_check_ret = await self._check_model(request)
+    if error_check_ret is not None:
+        return error_check_ret
+
+    # 2. 引擎健康检查
+    if self.engine_client.errored:
+        raise self.engine_client.dead_error
+
+    # 3. ★★★ 委托给 OpenAIServingRender.render_chat()
+    return await self.openai_serving_render.render_chat(request)
+```
+
+**关键点**：`OpenAIServingChat.render_chat_request()` 本身只做模型校验和引擎健康检查，真正的数据预处理全部委托给 `self.openai_serving_render.render_chat(request)`。
 
 ---
 
-### 3.2 渲染层：消息解析、模板应用与 Tokenization
+### 3.2 Render 服务层：OpenAIServingRender
+
+**入口文件**：`vllm/entrypoints/serve/render/serving.py`
+
+**核心类**：`OpenAIServingRender`
+
+`OpenAIServingRender` 是数据预处理的**协调中心**，负责请求校验、工具调用配置、参数构建，然后调用底层 `BaseRenderer` 执行实际的渲染和处理。
+
+#### 3.2.1初始化
+
+```python
+class OpenAIServingRender:
+    def __init__(self, model_config, renderer, io_processor, model_registry, ...):
+        self.renderer = renderer              # ★ 持有 BaseRenderer 实例
+        self.model_config = model_config
+        self.chat_template = chat_template
+        self.tool_parser = ParserManager.get_tool_parser(tool_parser, ...)
+        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        self.default_sampling_params = model_config.get_diff_sampling_param()
+```
+
+#### 3.2.2 `render_chat()` — 核心预处理入口
+
+这是数据预处理的**核心调度方法**：
+
+```python
+async def render_chat(self, request):
+    tokenizer = self.renderer.tokenizer
+    tool_parser = self.tool_parser
+
+    # 1. Mistral tokenizer 特殊预处理
+    if is_mistral_tokenizer(tokenizer):
+        _mt.maybe_serialize_tool_calls(request)
+        _mt.truncate_tool_call_ids(request)
+        _mt.validate_request_params(request)
+
+    # 2. tool_choice 校验
+    tool_parsing_unavailable = (
+        tool_parser is None
+        and not is_mistral_tokenizer(tokenizer)
+        and not self.use_harmony
+    )
+    if tool_parsing_unavailable and request.tool_choice not in (None, "none"):
+        return self.create_error_response(...)
+
+    # 3. 准备工具定义
+    tool_dicts = [tool.model_dump() for tool in request.tools] if request.tools else None
+
+    # 4. 分支处理
+    if not self.use_harmony:
+        # ★ 常规路径：校验 chat template → preprocess_chat()
+        error_check_ret = self.validate_chat_template(...)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        conversation, engine_prompts = await self.preprocess_chat(
+            request, request.messages,
+            default_template=self.chat_template,
+            default_template_content_format=self.chat_template_content_format,
+            default_template_kwargs=self.default_chat_template_kwargs,
+            tool_dicts=tool_dicts,
+            tool_parser=tool_parser,
+        )
+    else:
+        # Harmony (GPT-OSS) 特殊路径
+        conversation, engine_prompts = self._make_request_with_harmony(request, ...)
+
+    return conversation, engine_prompts
+```
+
+#### 3.2.3 `preprocess_chat()` — 参数构建并调用 Renderer
+
+```python
+async def preprocess_chat(self, request, messages, default_template, ...):
+    renderer = self.renderer
+    mm_config = self.model_config.multimodal_config
+
+    # 1. 合并模板 kwargs（注入 tools、tokenize 标志）
+    default_template_kwargs = merge_kwargs(
+        default_template_kwargs,
+        dict(tools=tool_dicts, tokenize=is_mistral_tokenizer(renderer.tokenizer)),
+    )
+
+    # 2. 构建 TokenizeParams 和 ChatParams
+    tok_params = request.build_tok_params(self.model_config)
+    chat_params = request.build_chat_params(
+        default_template, default_template_content_format
+    ).with_defaults(
+        default_template_kwargs,
+        default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+        default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+    )
+
+    # 3. ★★★ 调用 BaseRenderer.render_chat_async() — 真正的底层处理
+    (conversation,), (engine_prompt,) = await renderer.render_chat_async(
+        [messages],
+        chat_params,
+        tok_params,
+        prompt_extras={
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt")
+            if (v := getattr(request, k, None)) is not None
+        },
+    )
+
+    # 4. 工具解析器调整请求（如有）
+    if tool_parser is not None:
+        tool_choice = getattr(request, "tool_choice", "none")
+        if tool_choice != "none":
+            tokenizer = renderer.get_tokenizer()
+            request = tool_parser(tokenizer).adjust_request(request=request)
+
+    return conversation, [engine_prompt]
+```
+
+---
+
+### 3.3 Renderer 渲染层：BaseRenderer
 
 **入口文件**：`vllm/renderers/base.py`
 
-**核心类**：`BaseRenderer`（抽象基类），具体实现包括 `HfRenderer`、`MistralRenderer`、`Grok2Renderer` 等
+**核心类**：`BaseRenderer`（抽象基类），具体实现包括 `HfRenderer`、`MistralRenderer`、`Grok2Renderer`
 
-#### 3.2.1 四步处理流程
+`BaseRenderer.render_chat_async()` 是底层的**四步处理流水线**，由 `OpenAIServingRender.preprocess_chat()` 调用：
 
-`BaseRenderer.render_chat()` 内部按四个步骤依次处理：
+#### 3.3.1 `render_chat_async()` 四步流程
 
 ```python
-def render_chat(self, conversations, chat_params, tok_params=None):
-    # Step 1: 消息渲染 — 解析 messages，应用 chat template，提取多模态数据
-    rendered = [self.render_messages(conversation, chat_params)
-                for conversation in conversations]
-    # 返回 (conversation, DictPrompt)
-    # DictPrompt 中包含: prompt(文本), multi_modal_data, multi_modal_uuids
+async def render_chat_async(self, conversations, chat_params, tok_params=None,
+                             *, prompt_extras=None):
+    arrival_time = time.time()
 
-    # Step 2: Tokenization — 文本转 token IDs
-    tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
+    if tok_params is None:
+        tok_params = self.default_chat_tok_params
+
+    # Step 1: 消息渲染（并行处理多个 conversation）
+    rendered = [
+        self.render_messages_async(conversation, chat_params)
+        for conversation in conversations
+    ]
+    out_conversations = []
+    dict_prompts = []
+    for conv, prompt in await asyncio.gather(*rendered):
+        out_conversations.append(conv)
+        dict_prompts.append(prompt)
+
+    # Step 2: Tokenization（并行处理多个 prompt）
+    tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
     # Step 3: 附加额外参数
     self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-    # Step 4: 引擎输入构建 — 多模态处理在此触发
-    eng_prompts = [self.process_for_engine(prompt, arrival_time)
-                   for prompt in tok_prompts]
+    # Step 4: 引擎输入构建（并行处理，多模态处理在此触发）
+    eng_prompts = await asyncio.gather(
+        *(self.process_for_engine_async(p, arrival_time) for p in tok_prompts)
+    )
+
+    return out_conversations, eng_prompts
 ```
 
-#### 3.2.2 Step 1 详解：消息渲染 (`render_messages`)
+#### 3.3.2 Step 1 详解：消息渲染 (`render_messages`)
 
 以 `HfRenderer` 为例（标准 HuggingFace 路径）：
 
@@ -193,46 +356,46 @@ render_messages(messages, params)
 3. `transformers.ProcessorMixin.chat_template`（多模态模型）
 4. `tokenizer.chat_template`
 
-#### 3.2.3 Step 2 详解：Tokenization
+#### 3.3.3 Step 2 详解：Tokenization
 
 ```python
-def _tokenize_singleton_prompt(self, prompt, params):
+async def _tokenize_singleton_prompt_async(self, prompt, params):
     if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
         # 应用 pre-tokenization（如 truncation）
         prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
-        # 调用 tokenizer.encode()
-        prompt = self._tokenize_prompt(prompt, params)
+        # 调用 tokenizer.encode()（异步微批处理）
+        prompt = await self._tokenize_prompt_async(prompt, params)
 
     # 需要时反向 detokenize
     if params.needs_detokenization and "prompt" not in prompt:
-        prompt = self._detokenize_prompt(prompt)
+        prompt = await self._detokenize_prompt_async(prompt)
 
     return params.apply_post_tokenization(self.tokenizer, prompt)
 ```
 
 > **注意**：此阶段 `multi_modal_data` 原封不动地附着在 prompt dict 上传递，不做任何处理。
 
-#### 3.2.4 Step 4 详解：引擎输入构建 (`process_for_engine`)
+#### 3.3.4 Step 4 详解：引擎输入构建 (`process_for_engine_async`)
 
 ```
-process_for_engine(prompt, arrival_time)
+process_for_engine_async(prompt, arrival_time)
     │
-    ├── _process_singleton(prompt)
+    ├── _process_singleton(prompt) / _process_singleton_async(prompt)
     │   │
     │   └── _process_tokens(prompt)
     │       │
     │       ├── 检查 prompt.get("multi_modal_data")
     │       │
-    │       ├── [有 mm_data] → _process_multimodal()  ← 触发多模态处理
+    │       ├── [有 mm_data] → _process_multimodal()  ← ★ 触发多模态处理
     │       │
-    │       └── [无 mm_data] → token_inputs(prompt_token_ids)  ← 纯文本
+    │       └── [无 mm_data] → token_inputs(prompt_token_ids)  ← 纯文本路径
     │
     └── engine_prompt["arrival_time"] = arrival_time
 ```
 
 ---
 
-### 3.3 多模态处理层：HF Processor 集成
+### 3.4 多模态处理层：HF Processor 集成
 
 **核心文件**：
 - `vllm/renderers/base.py` — `_process_multimodal()` 调度入口
@@ -240,7 +403,7 @@ process_for_engine(prompt, arrival_time)
 - `vllm/multimodal/processing/context.py` — `InputProcessingContext` 上下文，封装 HF Processor 调用
 - `vllm/model_executor/models/transformers/multimodal.py` — Transformers 通用多模态处理器
 
-#### 3.3.1 多模态处理器的创建
+#### 3.4.1 多模态处理器的创建
 
 在 `BaseRenderer.__init__()` 中：
 
@@ -248,52 +411,49 @@ process_for_engine(prompt, arrival_time)
 if config.model_config.is_multimodal_model:
     from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 
-    # 创建处理结果缓存
     mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
     # 深拷贝 tokenizer 避免 Rust tokenizer 并发冲突
     mm_tokenizer = copy.deepcopy(tokenizer)
 
-    # 通过注册表创建对应模型的多模态处理器
-    self.mm_processor = mm_registry.create_processor(
-        config.model_config,
-        tokenizer=mm_tokenizer,
-        cache=mm_processor_cache,
-    )
+    with set_default_torch_num_threads():
+        self.mm_processor = mm_registry.create_processor(
+            config.model_config,
+            tokenizer=mm_tokenizer,
+            cache=mm_processor_cache,
+        )
 ```
 
 `MULTIMODAL_REGISTRY` 根据模型类型分发到不同的 Processor 实现：
 - 多数 HF 模型 → 各自注册的 `BaseMultiModalProcessor` 子类
 - `model_impl="transformers"` 的通用路径 → `MultiModalProcessor`（`transformers/multimodal.py`）
 
-#### 3.3.2 `_process_multimodal()` 调度流程
+#### 3.4.2 `_process_multimodal()` 调度流程
 
 ```python
 def _process_multimodal(self, prompt, mm_data, mm_uuids, mm_processor_kwargs, ...):
     # 1. 解析原始多模态数据为结构化 items
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
-    # 例如: {"image": ImageProcessorItems([PIL.Image, ...])}
 
     # 2. 处理 UUIDs（用于缓存去重）
     mm_uuid_items = parse_mm_uuids(mm_uuids)
     mm_uuid_items = self._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, ...)
 
     # 3. 构建处理器输入
-    mm_processor_inputs = MMProcessorInputs(
-        prompt,              # token IDs 或文本
-        mm_data_items,       # 结构化多模态数据
-        mm_uuid_items,       # 缓存标识
+    mm_processor_inputs = ProcessorInputs(
+        prompt=prompt,
+        mm_data_items=mm_data_items,
+        mm_uuid_items=mm_uuid_items,
         hf_processor_mm_kwargs=mm_processor_kwargs or {},
     )
 
-    # 4. 调用多模态处理器
+    # 4. ★ 调用多模态处理器
     mm_inputs = mm_processor.apply(mm_processor_inputs, timing_ctx)
-    # → 这里最终会调用 HuggingFace Processor
 
     return mm_inputs
 ```
 
-#### 3.3.3 `BaseMultiModalProcessor.apply()` 核心逻辑
+#### 3.4.3 `BaseMultiModalProcessor.apply()` 核心逻辑
 
 ```python
 class BaseMultiModalProcessor:
@@ -320,100 +480,15 @@ class BaseMultiModalProcessor:
         # 5. 返回完整的多模态输入
         return mm_inputs(
             prompt_token_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,        # 包含 pixel_values 等张量
+            mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
 ```
 
-#### 3.3.4 HuggingFace Processor 的实际调用
-
-```python
-# vllm/multimodal/processing/context.py
-class InputProcessingContext:
-    def call_hf_processor(self, hf_processor, data, kwargs):
-        """
-        data = {"text": "...", "images": [PIL.Image, ...]}
-        kwargs = {"return_mm_token_type_ids": True, ...}
-        """
-        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
-        allowed_kwargs = get_allowed_kwarg_only_overrides(hf_processor, merged_kwargs)
-
-        # ★ 这就是对 transformers.ProcessorMixin.__call__() 的直接调用
-        output = hf_processor(**data, **allowed_kwargs, return_tensors="pt")
-        # 例如: Qwen2VLProcessor(text="...", images=[img], return_tensors="pt")
-        # 返回 BatchFeature: {
-        #   "input_ids": tensor([...]),
-        #   "pixel_values": tensor([...]),
-        #   "image_grid_thw": tensor([...]),
-        #   ...
-        # }
-
-        # 后处理：浮点张量转换为模型 dtype
-        return BatchFeature(self._postprocess_output(output.data))
-```
-
-#### 3.3.5 Transformers 通用多模态路径
-
-对于使用 `model_impl="transformers"` 的模型（如通过 `TransformersForCausalLM` 加载的 Qwen2-VL 等），有一条专门的通用处理路径：
-
-```python
-# vllm/model_executor/models/transformers/multimodal.py
-class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
-    def apply(self, inputs, timing_ctx):
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        # 如果输入是 token IDs，先 decode 为文本（HF Processor 需要文本输入）
-        if not isinstance(prompt, str):
-            prompt = hf_processor.decode(prompt)
-
-        # 调用 HF Processor
-        prompt_ids, processed_data, _ = self._apply_hf_processor_text_mm(...)
-
-        # 通过 mm_token_type_ids 推断占位符位置
-        mm_token_type_ids = processed_data.get("mm_token_type_ids")
-        mm_positions = torch.where(mm_token_type_ids == 1)[1]
-
-        # 调用 HF Processor 的内部方法计算每图 token 数
-        mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(
-            image_sizes=image_sizes, ...
-        )
-
-        # 切分并构建 PlaceholderRange
-        chunked_mm_positions = torch.split(mm_positions, split_sizes)
-        ...
-```
-
-**该路径的特殊之处**：
-- 使用 `mm_token_type_ids`（而非正则匹配占位符 token）来定位多模态区域
-- 调用 `hf_processor._get_num_multimodal_tokens()` 获取精确的 token 数量
-- 通过 `return_mm_token_type_ids=True` 强制 HF Processor 返回类型标记
-
-#### 3.3.6 多模态处理器的模型端集成
-
-在模型执行阶段（`MultiModalMixin.embed_multimodal()`）：
-
-```python
-class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
-    def embed_multimodal(self, **kwargs):
-        pixel_values = kwargs.pop("pixel_values", None)
-        image_embeds = kwargs.pop("image_embeds", None)
-        num_image_patches = kwargs.pop("num_image_patches")
-
-        if image_embeds is not None:
-            return image_embeds  # 直接使用预计算的嵌入
-
-        # 调用 transformers 模型的 vision encoder
-        vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
-        # → 这里调用的是 transformers 模型自身的视觉编码器
-
-        # 按 num_image_patches 切分
-        return list(torch.split(vision_embeddings, token_split_sizes, dim=0))
-```
-
 ---
 
-### 3.4 输出后处理
+### 3.5 输出后处理
 
 输出后处理发生在 `serving.py` 的流式/非流式生成器中：
 
@@ -428,41 +503,144 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
 ---
 
-## 4. 关键数据结构流转
+## 4. 完整调用链（精确版）
+
+以下是 `/v1/chat/completions` 请求的精确调用链，基于源码逐行追踪：
 
 ```
-ChatCompletionRequest.messages
+HTTP POST /v1/chat/completions
     │
-    ▼ (parse_chat_messages)
-ConversationMessage[] + MultiModalDataDict
-    │                    {"image": [PIL.Image], "audio": [...]}
-    ▼ (render_messages + apply_chat_template)
-DictPrompt
-    {"prompt": str, "multi_modal_data": {...}, "multi_modal_uuids": {...}}
+    ▼
+OpenAIServingChat.create_chat_completion(request, raw_request)
     │
-    ▼ (tokenize_prompts)
-TokPrompt (TokensPrompt)
-    {"prompt_token_ids": [int], "multi_modal_data": {...}, ...}
+    │  ① 初始化 ReasoningParser
     │
-    ▼ (process_for_engine → _process_multimodal)
-MultiModalInputs
-    {"prompt_token_ids": [int],
-     "mm_kwargs": {
-         "pixel_values": Tensor,
-         "image_grid_thw": Tensor, ...
-     },
-     "mm_placeholders": {"image": [PlaceholderRange(...)]},
-     "mm_hashes": {"image": ["hash1", ...]}}
+    ├── self.render_chat_request(request)
+    │   │
+    │   ├── self._check_model(request)                    # 模型校验
+    │   ├── self.engine_client.errored → raise dead_error  # 引擎健康检查
+    │   │
+    │   └── self.openai_serving_render.render_chat(request)   ← ★ 委托
+    │       │
+    │       │  [OpenAIServingRender.render_chat()]
+    │       │
+    │       ├── Mistral tokenizer 特殊处理
+    │       │
+    │       ├── tool_choice 校验
+    │       │
+    │       ├── validate_chat_template()
+    │       │
+    │       └── self.preprocess_chat(request, request.messages, ...)
+    │           │
+    │           │  [OpenAIServingRender.preprocess_chat()]
+    │           │
+    │           ├── 构建 tok_params = request.build_tok_params(model_config)
+    │           ├── 构建 chat_params = request.build_chat_params(...).with_defaults(...)
+    │           │
+    │           └── renderer.render_chat_async([messages], chat_params, tok_params, ...)
+    │               │
+    │               │  [BaseRenderer.render_chat_async()]  ← ★★ 四步流水线
+    │               │
+    │               ├── Step 1: render_messages_async(messages, chat_params)
+    │               │   │
+    │               │   │  [HfRenderer.render_messages()]
+    │               │   │
+    │               │   ├── parse_chat_messages(messages, model_config, ...)
+    │               │   │   → 提取 mm_data (PIL.Image 等), mm_uuids, conversation
+    │               │   │
+    │               │   ├── apply_chat_template(tokenizer, conversation, ...)
+    │               │   │   → Jinja2 模板渲染 → prompt 文本
+    │               │   │
+    │               │   └── 返回 (conversation, DictPrompt)
+    │               │
+    │               ├── Step 2: tokenize_prompts_async(dict_prompts, tok_params)
+    │               │   │
+    │               │   └── _tokenize_singleton_prompt_async(prompt, params)
+    │               │       ├── params.apply_pre_tokenization(tokenizer, prompt)
+    │               │       ├── tokenizer.encode(prompt["prompt"])  → prompt_token_ids
+    │               │       └── params.apply_post_tokenization(tokenizer, prompt)
+    │               │       (mm_data 原样保留在 prompt dict 中)
+    │               │
+    │               ├── Step 3: _apply_prompt_extras(tok_prompts, prompt_extras)
+    │               │   └── 将 mm_processor_kwargs, cache_salt 写入 prompt dict
+    │               │
+    │               └── Step 4: process_for_engine_async(prompt, arrival_time)
+    │                   │
+    │                   └── _process_tokens(prompt)
+    │                       │
+    │                       ├── [无 mm_data] → token_inputs(prompt_token_ids)
+    │                       │
+    │                       └── [有 mm_data] → _process_multimodal(...)
+    │                           │
+    │                           ├── mm_processor.info.parse_mm_data(mm_data)
+    │                           ├── self._process_mm_uuids(...)
+    │                           │
+    │                           └── mm_processor.apply(processor_inputs, timing_ctx)
+    │                               │
+    │                               │  [BaseMultiModalProcessor.apply()]
+    │                               │
+    │                               ├── self._apply_hf_processor_text_mm(...)
+    │                               │   └── ctx.call_hf_processor(hf_processor, data, kwargs)
+    │                               │       └── hf_processor(**data, return_tensors="pt")
+    │                               │           ★ transformers.ProcessorMixin.__call__()
+    │                               │
+    │                               ├── _find_mm_placeholders(prompt_ids, ...)
+    │                               └── 返回 MultiModalInputs
     │
-    ▼ (engine_client.generate)
-ProcessorInputs → 引擎
+    │  返回 (conversation, [engine_prompt])
+    │
+    ├── ② 构建 request_id, request_metadata
+    ├── ③ self._maybe_get_adapters(request)
+    ├── ④ get_max_tokens(...) → sampling_params
+    ├── ⑤ reasoning_parser.is_reasoning_end(prompt_token_ids)
+    │
+    └── ⑥ self.engine_client.generate(engine_prompt, sampling_params, ...)
+        │
+        └── 流式/非流式后处理 → HTTP Response
 ```
 
 ---
 
-## 5. 与 transformers 库的集成点
+## 5. 关键数据结构流转
 
-### 5.1 集成总览
+```
+ChatCompletionRequest.messages
+    │  [{role: "user", content: [{type: "text", text: "..."}, {type: "image_url", ...}]}]
+    │
+    ▼ (Step 1: parse_chat_messages + apply_chat_template)
+DictPrompt
+    {"prompt": "<|im_start|>user\n<image>\nWhat is this?\n...",
+     "multi_modal_data": {"image": [PIL.Image]},
+     "multi_modal_uuids": {"image": ["hash1"]}}
+    │
+    ▼ (Step 2: tokenize_prompts_async)
+TokPrompt (TokensPrompt)
+    {"prompt_token_ids": [151644, 872, ...],
+     "multi_modal_data": {"image": [PIL.Image]},    ← mm_data 原样传递
+     "multi_modal_uuids": {"image": ["hash1"]}}
+    │
+    ▼ (Step 3: _apply_prompt_extras)
+TokPrompt + extras
+    {"prompt_token_ids": [...], "multi_modal_data": {...},
+     "mm_processor_kwargs": {...}, "cache_salt": "..."}
+    │
+    ▼ (Step 4: process_for_engine_async → _process_multimodal)
+ProcessorInputs (MultiModalInputs)
+    {"type": "multimodal",
+     "prompt_token_ids": [int],
+     "mm_kwargs": MultiModalKwargs {
+         "pixel_values": Tensor,
+         "image_grid_thw": Tensor, ...}
+     "mm_placeholders": {"image": [PlaceholderRange(offset=5, length=256)]},
+     "mm_hashes": {"image": ["hash1"]}}
+    │
+    ▼ (engine_client.generate)
+引擎消费
+```
+
+---
+
+## 6. 与 transformers 库的集成点
 
 | 集成点 | transformers 组件 | vLLM 调用位置 | 用途 |
 |--------|-------------------|---------------|------|
@@ -474,37 +652,16 @@ ProcessorInputs → 引擎
 | **Vision Encoder** | `model.get_image_features()` | `MultiModalMixin.embed_multimodal()` | 模型执行阶段的视觉编码 |
 | **RoPE Index** | `model.get_rope_index()` | `MultiModalMixin.get_mrope_input_positions()` | 多模态位置编码计算 |
 
-### 5.2 Processor 使用方式
-
-```python
-# 加载（带 LRU 缓存）
-from vllm.transformers_utils.processor import cached_get_processor
-processor = cached_get_processor(model_name, trust_remote_code=True)
-
-# 调用（通过 InputProcessingContext 封装）
-output = processor(
-    text="<|im_start|>user\n<image>\nDescribe this image\n...",
-    images=[PIL.Image.open("cat.jpg")],
-    return_tensors="pt",
-    return_mm_token_type_ids=True,  # transformers 通用路径额外需要
-)
-# output: BatchFeature {
-#     "input_ids": tensor([[151644, 872, ...]]),
-#     "pixel_values": tensor([[[[0.485, ...]]]]),
-#     "image_grid_thw": tensor([[1, 28, 28]]),
-#     "mm_token_type_ids": tensor([[0, 0, ..., 1, 1, ..., 0, 0]]),
-# }
-```
-
 ---
 
-## 6. 模块依赖关系图
+## 7. ���块依赖关系图
 
 ```
 vllm/entrypoints/openai/chat_completion/
-├── serving.py                         # API 层入口
+├── serving.py                         # ① API 层入口
 │   └── OpenAIServingChat
-│       ├── render_chat_request()      # 委托渲染
+│       ├── __init__(): openai_serving_render  ← 持有 Render 服务引用
+│       ├── render_chat_request()      # 模型校验 + 委托 render_chat()
 │       ├── create_chat_completion()   # 主流程
 │       ├── chat_completion_stream_generator()   # 流式后处理
 │       └── chat_completion_full_generator()     # 非流式后处理
@@ -513,14 +670,23 @@ vllm/entrypoints/openai/chat_completion/
 └── stream_harmony.py                  # Harmony 流式处理
 
 vllm/entrypoints/serve/render/
-└── serving.py                         # OpenAIServingRender
-    └── render_chat()                  # 委托给 BaseRenderer
+├── serving.py                         # ② Render 服务层
+│   └── OpenAIServingRender
+│       ├── __init__(): renderer       ← 持有 BaseRenderer 引用
+│       ├── render_chat()              # 工具校验 + 模板校验 + 调度
+│       ├── preprocess_chat()          # 参数构建 + 调用 renderer.render_chat_async()
+│       └── _make_request_with_harmony()  # Harmony (GPT-OSS) 路径
+└── api_router.py                      # /v1/chat/completions/render 路由
 
 vllm/renderers/
-├── base.py                            # BaseRenderer — 渲染层核心
-│   ├── render_chat()                  # 四步处理流程
-│   ├── _process_multimodal()          # 多模态处理调度
-│   └── process_for_engine()           # 引擎输入构建
+├── base.py                            # ③ Renderer 渲染层核心
+│   └── BaseRenderer
+│       ├── render_chat_async()        # 四步处理流水线
+│       ├── render_messages_async()    # Step 1: 消息渲染 (abstract)
+│       ├── tokenize_prompts_async()   # Step 2: Tokenization
+│       ├── _apply_prompt_extras()     # Step 3: 附加参数
+│       ├── process_for_engine_async() # Step 4: 引擎输入构建
+│       └── _process_multimodal()      # Step 4 内: 多模态处理调度
 ├── hf.py                              # HfRenderer — 标准 HF 路径
 ├── mistral.py                         # MistralRenderer
 ├── grok2.py                           # Grok2Renderer
@@ -528,14 +694,14 @@ vllm/renderers/
 
 vllm/entrypoints/chat_utils.py         # parse_chat_messages() — 消息解析
 
-vllm/multimodal/
+vllm/multimodal/                       # ④ 多模态处理层
 ├── registry.py                        # MULTIMODAL_REGISTRY — 处理器注册表
 ├── processing/
-│   ├── processor.py                   # BaseMultiModalProcessor — 处理器抽象
+│   ├── processor.py                   # BaseMultiModalProcessor
 │   │   ├── apply()                    # 处理主入口
 │   │   ├── _call_hf_processor()       # 调用 HF Processor
 │   │   └── _apply_hf_processor_text_mm()
-│   ├── context.py                     # InputProcessingContext
+│   ���── context.py                     # InputProcessingContext
 │   │   └── call_hf_processor()        # 实际执行 hf_processor(...)
 │   └── inputs.py                      # ProcessorInputs 数据结构
 ├── parse.py                           # 多模态数据解析
@@ -545,12 +711,10 @@ vllm/multimodal/
 
 vllm/model_executor/models/transformers/
 └── multimodal.py                      # Transformers 通用多模态路径
-    ├── MultiModalProcessingInfo       # 处理信息（max tokens 等）
-    ├── MultiModalProcessor            # 通用处理器（用 mm_token_type_ids）
-    ├── MultiModalMixin                # 模型 Mixin
-    │   ├── embed_multimodal()         # 视觉编码
-    │   └── get_mrope_input_positions()# MRoPE 位置编码
-    └── MultiModalDummyInputsBuilder   # Dummy 输入构建（profiling 用）
+    ├── MultiModalProcessingInfo       # 处理信息 (max tokens 等)
+    ├── MultiModalProcessor            # 通用处理器 (mm_token_type_ids)
+    ├── MultiModalMixin                # 模型 Mixin (embed_multimodal)
+    └── MultiModalDummyInputsBuilder   # Dummy 输入构建 (profiling)
 
 vllm/transformers_utils/
 └── processor.py                       # get_processor() / cached_get_processor()
@@ -563,16 +727,28 @@ vllm/sampling_params.py                # SamplingParams / BeamSearchParams
 
 ---
 
-## 7. 关键设计决策
+## 8. 关键设计决策
 
-### 7.1 多模态处理在 API 进程中完成
+### 8.1 三层委托架构
+
+vLLM 的数据预处理采用三层委托设计：
+
+| 层次 | 类 | 职责 |
+|------|-----|------|
+| **API 层** | `OpenAIServingChat` | 模型校验、引擎健康检查、LoRA 适配、采样参数构建、引擎提交、输出后处理 |
+| **Render 服务层** | `OpenAIServingRender` | 工具调用校验、chat template 校验、参数构建（ChatParams/TokenizeParams）、工具解析器调整 |
+| **Renderer 渲染层** | `BaseRenderer` | 消息渲染、tokenization、多模态处理、引擎输入组装 |
+
+这种设计使得 `OpenAIServingRender` 可以**独立于引擎运行**（GPU-less render server），只需要 tokenizer 和模型配置即可完成数据预处理，从而支持 prefill/decode 分离的 disaggregated serving 架构。
+
+### 8.2 多模态处理在 API 进程中完成
 
 多模态数据的预处理（图片 resize、归一化等）发生在 API 进程中（`BaseRenderer._process_multimodal()`），而非引擎 worker 中。这带来以下优势：
 - **减轻引擎负担**：GPU worker 只需处理已准备好的张量
 - **支持缓存**：通过 `mm_processor_cache` 避免重复处理相同的多模态输入
-- **并行处理**：API 进程可在引擎忙时预处理下一个请求
+- **并行处理**：API 进程可在引擎忙时预处���下一个请求
 
-### 7.2 Tokenizer 深拷贝
+### 8.3 Tokenizer 深拷贝
 
 ```python
 mm_tokenizer = copy.deepcopy(tokenizer)
@@ -580,68 +756,13 @@ mm_tokenizer = copy.deepcopy(tokenizer)
 
 为多模态处理器单独深拷贝一个 tokenizer，避免 Rust tokenizer 后端的并发冲突（`RuntimeError: Already borrowed`）。
 
-### 7.3 两种多模态处理路径
+### 8.4 两种多模态处理路径
 
 | 路径 | 适用模型 | 占位符定位方式 |
 |------|----------|---------------|
 | **模型专用 Processor** | 大多数原生 vLLM 支持的模型 | 通过 `_get_prompt_updates()` 和正则匹配 |
 | **Transformers 通用路径** | `model_impl="transformers"` | 通过 `mm_token_type_ids` |
 
-### 7.4 渲染与处理的分离
+### 8.5 异步流水线设计
 
-vLLM 将"消息到 prompt 文本"的渲染与"多模态数据处理"明确分离：
-- **渲染层**（Step 1-2）只负责文本处理，`mm_data` 原样传递
-- **处理层**（Step 4）在 `process_for_engine()` 中才触发多模态数据的实际处理
-- 这使得渲染层可以被独立使用（如 `/v1/chat/completions/render` 端点）
-
----
-
-## 8. 数据处理时序图
-
-```
-User Request
-    │
-    │  ① HTTP POST /v1/chat/completions
-    ▼
-OpenAIServingChat.create_chat_completion()
-    │
-    │  ② 模型校验 + 引擎健康检查
-    │  ③ 初始化 ReasoningParser
-    ▼
-OpenAIServingRender.render_chat()
-    │
-    ▼
-BaseRenderer.render_chat()
-    │
-    │  ④ render_messages():
-    │     - parse_chat_messages() → 提取 mm_data (PIL.Image 等)
-    │     - apply_chat_template() → 生成带占位符的 prompt
-    │
-    │  ⑤ tokenize_prompts():
-    │     - tokenizer.encode(prompt) → token IDs
-    │     - mm_data 原样传递
-    │
-    │  ⑥ process_for_engine():
-    │     - _process_tokens() 检测到 multi_modal_data
-    │     - _process_multimodal() 调度
-    │         │
-    │         ▼
-    │     BaseMultiModalProcessor.apply()
-    │         │
-    │         │  ⑦ _call_hf_processor():
-    │         │     hf_processor(text=prompt, images=[img], return_tensors="pt")
-    │         │     → BatchFeature {pixel_values, input_ids, ...}
-    │         │
-    │         │  ⑧ 计算 mm_placeholders
-    │         │  ⑨ 组装 MultiModalInputs
-    │         ▼
-    │     返回 engine_prompt (ProcessorInputs)
-    ▼
-回到 create_chat_completion()
-    │
-    │  ⑩ 构建 SamplingParams
-    │  ⑪ 判断 reasoning_ended
-    │  ⑫ engine_client.generate(engine_prompt, sampling_params, ...)
-    ▼
-Engine 生成 → 流式/非流式后处理 → 返回响应
-```
+`BaseRenderer.render_chat_async()` 中 Step 1 和 Step 4 都使用了 `asyncio.gather()` 进行并行处理，当有多个 conversation 时可以并发渲染和处理，提高吞吐量。
