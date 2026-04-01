@@ -16,26 +16,41 @@
 
 """Unified multimodal processor for all VL model types.
 
-Consolidates the four separate VL processor wrappers (QwenVLProcessor,
-Qwen3VLProcessor, PaddleOCRVLProcessor, Ernie4_5_VLProcessor) into a
-single class that dispatches per ``model_type``.
+Consolidates the four separate VL processor DataProcessor classes
+(qwen_vl, qwen3_vl, paddleocr_vl, ernie4_5_vl) into a single class
+that dispatches per ``model_type``.
+
+Encoding logic (text2ids, request2ids, _add_image, etc.) is defined
+in the ``MultiModalEncoderMixin`` (see ``mm_encoder.py``).
 """
 
-import pickle
+import os
+from collections import defaultdict
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import numpy as np
+import paddle
 
 from fastdeploy.input.base_processor import BaseTextProcessor
-from fastdeploy.input.utils import IDS_TYPE_FLAG, process_stop_token_ids
+from fastdeploy.input.mm_encoder import (  # noqa: F401 — re-exported for external use
+    _QWEN3_VIDEO_MAX_PIXELS,
+    _QWEN3_VIDEO_MIN_PIXELS,
+    _QWEN_FAMILY,
+    ERNIE4_5_VL,
+    PADDLEOCR_VL,
+    QWEN3_VL,
+    QWEN_VL,
+    MultiModalEncoderMixin,
+)
+from fastdeploy.input.utils import (
+    IDS_TYPE_FLAG,
+    MAX_IMAGE_DIMENSION,
+    process_stop_token_ids,
+)
 from fastdeploy.utils import data_processor_logger
 
-QWEN_VL = "qwen_vl"
-QWEN3_VL = "qwen3_vl"
-PADDLEOCR_VL = "paddleocr_vl"
-ERNIE4_5_VL = "ernie4_5_vl"
-
+# ---- Constants only used by this module ----
 _SUPPORTED_MODEL_TYPES = {QWEN_VL, QWEN3_VL, PADDLEOCR_VL, ERNIE4_5_VL}
 
 _QWEN_EXPECTED_KWARGS = {
@@ -63,13 +78,25 @@ _DEFAULT_MM_LIMITS = {"image": 1, "video": 1, "audio": 1}
 
 _SAMPLING_EPS = 1e-5
 
+# Qwen-family defaults
+_QWEN_FRAME_FACTOR = 2
+_QWEN_FPS = 2.0
+_QWEN_FPS_MIN_FRAMES = 4
+_QWEN_FPS_MAX_FRAMES = 768
 
-class MultiModalProcessor(BaseTextProcessor):
+
+class MultiModalProcessor(MultiModalEncoderMixin, BaseTextProcessor):
     """Unified multimodal processor for all supported VL model types.
 
     Dispatches image-processor creation, config initialisation, and
     encoding logic based on ``model_type``.
     """
+
+    # Ernie special token strings
+    _ERNIE_IMG_START = "<|IMAGE_START|>"
+    _ERNIE_IMG_END = "<|IMAGE_END|>"
+    _ERNIE_VID_START = "<|VIDEO_START|>"
+    _ERNIE_VID_END = "<|VIDEO_END|>"
 
     def __init__(
         self,
@@ -102,9 +129,19 @@ class MultiModalProcessor(BaseTextProcessor):
         data_processor_logger.info(f"model_name_or_path: {model_name_or_path}")
 
         processor_kwargs = self._parse_processor_kwargs(mm_processor_kwargs)
-        self._init_mm_processor(processor_kwargs)
-        self._init_mm_config()
+        self._init_image_processor()
+        self._init_encoding_tokenizer()
+        self._init_conv_params()
+        self._init_special_tokens()
+        self._init_video_params(processor_kwargs)
+        if model_type == ERNIE4_5_VL:
+            self._init_ernie_pixel_params(processor_kwargs)
+            self._init_ernie_token_type_mapping()
         self.limit_mm_per_prompt = self._parse_limits(limit_mm_per_prompt)
+
+    # ------------------------------------------------------------------
+    # Initialisation helpers
+    # ------------------------------------------------------------------
 
     def _load_tokenizer(self):
         """Load the appropriate tokenizer based on model_type."""
@@ -118,59 +155,131 @@ class MultiModalProcessor(BaseTextProcessor):
             tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path, padding_side="left", use_fast=True)
         return tokenizer
 
-    def _init_mm_processor(self, processor_kwargs: dict):
-        """Create the model-type-specific internal DataProcessor."""
-        if self.model_type == QWEN_VL:
-            from fastdeploy.input.qwen_vl_processor.process import DataProcessor
+    def _init_encoding_tokenizer(self):
+        """Create a separate encoding tokenizer for ernie (Ernie4_5Tokenizer)."""
+        if self.model_type == ERNIE4_5_VL:
+            from fastdeploy.input.ernie4_5_tokenizer import Ernie4_5Tokenizer
 
-            tokens_per_second = getattr(getattr(self.config, "vision_config", None), "tokens_per_second", 2)
-            self.processor = DataProcessor(
-                model_path=self.model_name_or_path,
-                enable_processor_cache=self.enable_processor_cache,
-                tokens_per_second=tokens_per_second,
-                tokenizer=self.tokenizer,
-                **processor_kwargs,
+            vocab_file_names = ["tokenizer.model", "spm.model", "ernie_token_100k.model"]
+            for name in vocab_file_names:
+                if os.path.exists(os.path.join(self.model_name_or_path, name)):
+                    Ernie4_5Tokenizer.resource_files_names["vocab_file"] = name
+                    break
+            self.encoding_tokenizer = Ernie4_5Tokenizer.from_pretrained(self.model_name_or_path)
+            self.encoding_tokenizer.ignored_index = -100
+        else:
+            self.encoding_tokenizer = self.tokenizer
+
+    def _init_image_processor(self):
+        """Create the model-type-specific image processor."""
+        if self.model_type == ERNIE4_5_VL:
+            from fastdeploy.input.image_processors.adaptive_processor import (
+                AdaptiveImageProcessor,
             )
+
+            self.image_processor = AdaptiveImageProcessor.from_pretrained(self.model_name_or_path)
         elif self.model_type == QWEN3_VL:
-            from fastdeploy.input.qwen3_vl_processor.process import DataProcessor
+            from fastdeploy.input.image_processors.qwen3_processor import ImageProcessor
 
-            self.processor = DataProcessor(
-                model_path=self.model_name_or_path,
-                enable_processor_cache=self.enable_processor_cache,
-                tokenizer=self.tokenizer,
-                **processor_kwargs,
-            )
+            self.image_processor = ImageProcessor.from_pretrained(self.model_name_or_path)
         elif self.model_type == PADDLEOCR_VL:
-            from fastdeploy.input.paddleocr_vl_processor.process import DataProcessor
-
-            tokens_per_second = getattr(getattr(self.config, "vision_config", None), "tokens_per_second", 2)
-            self.processor = DataProcessor(
-                model_path=self.model_name_or_path,
-                enable_processor_cache=self.enable_processor_cache,
-                tokens_per_second=tokens_per_second,
-                tokenizer=self.tokenizer,
-                **processor_kwargs,
+            from fastdeploy.input.image_processors.paddleocr_processor import (
+                ImageProcessor,
             )
-        elif self.model_type == ERNIE4_5_VL:
-            from fastdeploy.input.ernie4_5_vl_processor.process import DataProcessor
 
-            self.processor = DataProcessor(
-                tokenizer_name=self.model_name_or_path,
-                image_preprocessor_name=self.model_name_or_path,
-                enable_processor_cache=self.enable_processor_cache,
-                **processor_kwargs,
-            )
-            self.processor.eval()
+            self.image_processor = ImageProcessor.from_pretrained(self.model_name_or_path)
+        else:  # QWEN_VL
+            from fastdeploy.input.image_processors.qwen_processor import ImageProcessor
 
-    def _init_mm_config(self):
-        """Set model-type-specific multimodal configuration attributes."""
+            self.image_processor = ImageProcessor.from_pretrained(self.model_name_or_path)
+
+    def _init_conv_params(self):
+        """Set spatial/temporal convolution sizes."""
+        if self.model_type == ERNIE4_5_VL:
+            self.spatial_conv_size = 2
+            self.temporal_conv_size = 2
+        else:
+            self.spatial_conv_size = self.image_processor.merge_size
+            self.temporal_conv_size = self.image_processor.temporal_patch_size
+
+    def _init_special_tokens(self):
+        """Set model-type-specific special tokens and IDs."""
         if self.model_type in (QWEN_VL, QWEN3_VL):
-            self.image_patch_id = self.processor.image_token_id
+            self.image_token = "<|image_pad|>"
+            self.video_token = "<|video_pad|>"
+            self.image_token_id = self.encoding_tokenizer.convert_tokens_to_ids(self.image_token)
+            self.video_token_id = self.encoding_tokenizer.convert_tokens_to_ids(self.video_token)
+            self.image_patch_id = self.image_token_id
+            self._video_fill_token_id = self.image_token_id
+            self.vision_start = "<|vision_start|>"
+            self.vision_start_id = self.encoding_tokenizer.convert_tokens_to_ids(self.vision_start)
         elif self.model_type == PADDLEOCR_VL:
-            self.image_patch_id = self.processor.image_patch_id
-        elif self.model_type == ERNIE4_5_VL:
-            self.image_patch_id = self.processor.image_patch_id
-            self.spatial_conv_size = self.processor.spatial_conv_size
+            self.image_token = "<|IMAGE_PLACEHOLDER|>"
+            self.video_token = "<|video_pad|>"
+            self.image_token_id = self.encoding_tokenizer.convert_tokens_to_ids(self.image_token)
+            self.video_token_id = self.encoding_tokenizer.convert_tokens_to_ids(self.video_token)
+            self.image_patch_id = self.image_token_id
+            self._video_fill_token_id = self.video_token_id
+            self.vision_start = "<|IMAGE_START|>"
+            self.vision_start_id = self.encoding_tokenizer.convert_tokens_to_ids(self.vision_start)
+        else:  # ERNIE4_5_VL
+            self.image_patch_id = self.encoding_tokenizer.convert_tokens_to_ids("<|IMAGE_PLACEHOLDER|>")
+            self._video_fill_token_id = self.image_patch_id
+            self.image_start_id = self.encoding_tokenizer.convert_tokens_to_ids(self._ERNIE_IMG_START)
+            self.image_end_id = self.encoding_tokenizer.convert_tokens_to_ids(self._ERNIE_IMG_END)
+            self.video_start_id = self.encoding_tokenizer.convert_tokens_to_ids(self._ERNIE_VID_START)
+            self.video_end_id = self.encoding_tokenizer.convert_tokens_to_ids(self._ERNIE_VID_END)
+
+        tokens_per_second_default = 2
+        if self.model_type in (QWEN_VL, PADDLEOCR_VL):
+            tokens_per_second_default = getattr(getattr(self.config, "vision_config", None), "tokens_per_second", 2)
+        self.tokens_per_second = tokens_per_second_default
+
+        self.role_prefixes = {
+            "system": "",
+            "user": "User: ",
+            "bot": "Assistant: ",
+            "assistant": "Assistant: ",
+        }
+        if self.model_type == ERNIE4_5_VL:
+            self.role_prefixes["tool"] = "Tool: "
+
+    def _init_video_params(self, processor_kwargs):
+        """Set video sampling parameters from kwargs or defaults."""
+        if self.model_type == ERNIE4_5_VL:
+            self.min_frames = processor_kwargs.get("video_min_frames", 16)
+            self.max_frames = processor_kwargs.get("video_max_frames", 180)
+            self.target_frames = processor_kwargs.get("video_target_frames", -1)
+            self.fps = processor_kwargs.get("video_fps", 2)
+            self.frames_sample = processor_kwargs.get("video_frames_sample", "leading")
+        else:
+            self.min_frames = processor_kwargs.get("video_min_frames", _QWEN_FPS_MIN_FRAMES)
+            self.max_frames = processor_kwargs.get("video_max_frames", _QWEN_FPS_MAX_FRAMES)
+            self.target_frames = -1
+            self.fps = _QWEN_FPS
+            if self.model_type == PADDLEOCR_VL:
+                self.frame_factor = self.temporal_conv_size
+                self.fps = -1
+            else:
+                self.frame_factor = _QWEN_FRAME_FACTOR
+
+    def _init_ernie_pixel_params(self, processor_kwargs):
+        """Set ernie-specific pixel constraints."""
+        self.image_min_pixels = processor_kwargs.get("image_min_pixels", 4 * 28 * 28)
+        self.image_max_pixels = processor_kwargs.get("image_max_pixels", 6177 * 28 * 28)
+        self.video_min_pixels = processor_kwargs.get("video_min_pixels", 299 * 28 * 28)
+        self.video_max_pixels = processor_kwargs.get("video_max_pixels", 1196 * 28 * 28)
+
+    def _init_ernie_token_type_mapping(self):
+        """Build token_type_mapping for ernie."""
+        self._token_type_mapping = defaultdict(lambda: IDS_TYPE_FLAG["text"])
+        for token in (self._ERNIE_IMG_START, self._ERNIE_IMG_END, self._ERNIE_VID_START, self._ERNIE_VID_END):
+            self._token_type_mapping[token] = IDS_TYPE_FLAG["image"]
+        self._token_type_mapping[self.image_patch_id] = IDS_TYPE_FLAG["image"]
+
+    # ------------------------------------------------------------------
+    # Config parsing
+    # ------------------------------------------------------------------
 
     def _parse_processor_kwargs(self, kwargs: Optional[dict]) -> dict:
         """Parse and validate multimodal processor kwargs."""
@@ -214,6 +323,10 @@ class MultiModalProcessor(BaseTextProcessor):
             data_processor_logger.warning(f"Invalid limit-mm-per-prompt format: {e}, using default limits")
             return dict(_DEFAULT_MM_LIMITS)
 
+    # ------------------------------------------------------------------
+    # MM limit checking
+    # ------------------------------------------------------------------
+
     def _check_mm_limits(self, item):
         """Validate multimodal inputs against configured limits."""
         if isinstance(item, dict):
@@ -243,34 +356,82 @@ class MultiModalProcessor(BaseTextProcessor):
                 if len(data) > limit:
                     raise ValueError(f"Too many {modality} items in prompt, " f"got {len(data)} but limit is {limit}")
 
-    def _get_processor_cache(self, socket, mm_hashes: list) -> list:
-        """Retrieve cached processor results for the given hashes."""
-        req = pickle.dumps(mm_hashes)
-        socket.send_multipart([b"", req])
-        _, resp = socket.recv_multipart()
-        mm_items = pickle.loads(resp)
-        data_processor_logger.info(f"Get cache of mm_hashes: {mm_hashes}")
-        return mm_items
+    # ------------------------------------------------------------------
+    # mm_num_tokens — static, model-type-aware
+    # ------------------------------------------------------------------
 
-    def _update_processor_cache(self, socket, mm_hashes: list, mm_items):
-        """Update the processor cache with new results."""
-        req = pickle.dumps((mm_hashes, mm_items))
-        socket.send_multipart([b"", req])
-        data_processor_logger.info(f"Update cache of mm_hashes: {mm_hashes}")
+    @staticmethod
+    def _mm_num_tokens_qwen(grid_thw):
+        """Calculate token count for qwen-family models (merge_size=2, no temporal downsampling)."""
+        if isinstance(grid_thw, paddle.Tensor):
+            grid_thw = grid_thw.numpy()
+        if len(grid_thw) == 0:
+            return 0
+
+        def calc_one(thw):
+            t, h, w = map(int, thw)
+            return t * h * w // 4
+
+        if isinstance(grid_thw[0], (list, tuple, np.ndarray)):
+            return [calc_one(x) for x in grid_thw]
+        return calc_one(grid_thw)
+
+    @staticmethod
+    def _mm_num_tokens_ernie(grid_thw):
+        """Calculate token count for ernie (videos have temporal_conv_size downsampling)."""
+        if isinstance(grid_thw, paddle.Tensor):
+            grid_thw = grid_thw.numpy()
+        if len(grid_thw) == 0:
+            return 0
+
+        def calc_one(thw):
+            t, h, w = map(int, thw)
+            if t == 1:
+                return t * h * w // 4
+            else:
+                return t * h * w // 4 // 2
+
+        if isinstance(grid_thw[0], (list, tuple, np.ndarray)):
+            return [calc_one(x) for x in grid_thw]
+        return calc_one(grid_thw)
+
+    # ------------------------------------------------------------------
+    # get_mm_max_tokens_per_item
+    # ------------------------------------------------------------------
 
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Optional[Mapping[str, int]]:
-        """Return per-modality max token counts, if available."""
-        if self.model_type == ERNIE4_5_VL:
-            return self.processor.get_mm_max_tokens_per_item(seq_len)
-        return None
+        if self.model_type != ERNIE4_5_VL:
+            return None
+        resized_height, resized_width = self.image_processor.get_smarted_resize(
+            height=MAX_IMAGE_DIMENSION,
+            width=MAX_IMAGE_DIMENSION,
+            min_pixels=self.image_min_pixels,
+            max_pixels=self.image_max_pixels,
+        )[0]
+        patches_h_img, patches_w_img = self.image_processor.get_smarted_resize(
+            height=resized_height,
+            width=resized_width,
+            min_pixels=self.image_min_pixels,
+            max_pixels=self.image_max_pixels,
+        )[1]
+        max_image_tokens = min((patches_h_img * patches_w_img) // (self.spatial_conv_size**2), seq_len)
+        patches_h_vid, patches_w_vid = self.image_processor.get_smarted_resize(
+            height=resized_height,
+            width=resized_width,
+            min_pixels=self.video_min_pixels,
+            max_pixels=self.video_max_pixels,
+        )[1]
+        max_video_tokens = min(
+            (patches_h_vid * patches_w_vid) // (self.spatial_conv_size**2 * self.temporal_conv_size),
+            seq_len,
+        )
+        return {"image": max_image_tokens, "video": max_video_tokens}
+
+    # ------------------------------------------------------------------
+    # process_request_dict
+    # ------------------------------------------------------------------
 
     def process_request_dict(self, request, max_model_len=None):
-        """Process a request dictionary into model inputs.
-
-        Unified template-method flow for all VL model types.  Per-model
-        differences are handled by small conditional branches rather than
-        duplicating the entire pipeline.
-        """
         request = self._apply_default_parameters(request)
 
         if not request.get("eos_token_ids"):
@@ -297,7 +458,7 @@ class MultiModalProcessor(BaseTextProcessor):
         outputs = self.pack_outputs(outputs)
 
         if self.model_type in (QWEN3_VL, ERNIE4_5_VL) and request.get("prompt_token_ids"):
-            pass  # preserve existing prompt_token_ids
+            pass
         else:
             request["prompt_token_ids"] = outputs["input_ids"].tolist()
         request["prompt_token_ids_len"] = len(request["prompt_token_ids"])
@@ -337,7 +498,6 @@ class MultiModalProcessor(BaseTextProcessor):
         return request
 
     def _process_stop_tokens(self, request):
-        """Handle stop token processing based on model type."""
         if self.model_type == QWEN3_VL:
             stop_sequences = request.get("stop", [])
             if stop_sequences:
@@ -348,7 +508,6 @@ class MultiModalProcessor(BaseTextProcessor):
             process_stop_token_ids(request, self.update_stop_seq)
 
     def _process_bad_words(self, request):
-        """Process bad_words into token ids."""
         bad_words = request.get("bad_words")
         bad_words_token_ids = request.get("bad_words_token_ids")
         if bad_words:
@@ -364,7 +523,7 @@ class MultiModalProcessor(BaseTextProcessor):
             if messages:
                 self._check_mm_limits(messages)
             request.setdefault("enable_thinking", default_thinking)
-            return self.processor.prompt_token_ids2outputs(request)
+            return self.prompt_token_ids2outputs(request)
 
         elif request.get("prompt"):
             multimodal_data = request.get("multimodal_data") or {}
@@ -374,7 +533,7 @@ class MultiModalProcessor(BaseTextProcessor):
             if self.model_type == ERNIE4_5_VL:
                 request["prompt_tokens"] = request.get("prompt")
             request.setdefault("enable_thinking", default_thinking)
-            return self.processor.text2ids(request["prompt"], images, videos)
+            return self.text2ids(request["prompt"], images, videos)
 
         elif request.get("messages"):
             messages = request["messages"]
@@ -388,13 +547,12 @@ class MultiModalProcessor(BaseTextProcessor):
                 else:
                     raise ValueError("Invalid input: chat_template_kwargs must be a dict")
             request.setdefault("enable_thinking", default_thinking)
-            return self.processor.request2ids(request)
+            return self.request2ids(request)
 
         else:
             raise ValueError(f"Request must contain 'prompt', or 'messages': {request}")
 
     def _process_post_tokens(self, request, outputs):
-        """Handle post-tokenization token appending."""
         if self.model_type == PADDLEOCR_VL:
             metadata = request.get("metadata")
             if metadata and metadata.get("generated_token_ids"):
@@ -404,7 +562,6 @@ class MultiModalProcessor(BaseTextProcessor):
                 self.append_completion_tokens(outputs, request["completion_token_ids"])
 
     def _apply_reasoning_parser(self, request):
-        """Apply reasoning parser and update model status dict."""
         model_status = self.reasoning_parser.get_model_status(request["prompt_token_ids"])
         parts = request["request_id"].split("_")
         if len(parts) > 1:
@@ -417,25 +574,26 @@ class MultiModalProcessor(BaseTextProcessor):
             self.model_status_dict[request["request_id"]] = model_status
         request["enable_thinking"] = model_status == "think_start"
 
+    # ------------------------------------------------------------------
+    # Completion token appending
+    # ------------------------------------------------------------------
+
     def append_completion_tokens(self, multimodal_inputs, completion_token_ids):
-        """Append completion tokens to existing multimodal outputs."""
         if self.model_type == ERNIE4_5_VL:
             self._append_completion_tokens_ernie(multimodal_inputs, completion_token_ids)
         else:
             self._append_completion_tokens_qwen(multimodal_inputs, completion_token_ids)
 
     def _append_completion_tokens_qwen(self, multimodal_inputs, completion_token_ids):
-        """Append completion tokens for qwen_vl / qwen3_vl / paddleocr_vl."""
         num_tokens = len(completion_token_ids)
         multimodal_inputs["input_ids"].extend(completion_token_ids)
         multimodal_inputs["token_type_ids"].extend([0] * num_tokens)
 
-        pos_ids = self.processor._compute_text_positions(multimodal_inputs["cur_position"], num_tokens)
+        pos_ids = self._compute_text_positions(multimodal_inputs["cur_position"], num_tokens)
         multimodal_inputs["position_ids"].append(pos_ids)
         multimodal_inputs["cur_position"] += num_tokens
 
     def _append_completion_tokens_ernie(self, multimodal_inputs, completion_token_ids):
-        """Append completion tokens for ernie4_5_vl."""
         num_tokens = len(completion_token_ids)
         multimodal_inputs["input_ids"].extend(completion_token_ids)
         multimodal_inputs["token_type_ids"].extend([IDS_TYPE_FLAG["text"]] * num_tokens)
@@ -445,8 +603,11 @@ class MultiModalProcessor(BaseTextProcessor):
             multimodal_inputs["position_ids"].append([start + i] * 3)
         multimodal_inputs["cur_position"] += num_tokens
 
+    # ------------------------------------------------------------------
+    # pack_outputs
+    # ------------------------------------------------------------------
+
     def pack_outputs(self, outputs):
-        """Convert intermediate processing outputs to final format."""
         if not outputs["images"]:
             outputs["images"] = None
             outputs["grid_thw"] = None
@@ -458,15 +619,18 @@ class MultiModalProcessor(BaseTextProcessor):
 
         outputs["input_ids"] = np.array(outputs["input_ids"], dtype=np.int64)
         outputs["token_type_ids"] = np.array(outputs["token_type_ids"], dtype=np.int64)
-        outputs["mm_num_token_func"] = self.processor.mm_num_tokens
 
-        if self.model_type in (QWEN_VL, QWEN3_VL, PADDLEOCR_VL):
-            outputs["position_ids"] = np.concatenate(outputs["position_ids"], axis=1, dtype=np.int64)
-            outputs["image_patch_id"] = self.processor.image_token_id
-            outputs["video_patch_id"] = self.processor.video_token_id
-            outputs["position_ids"] = outputs["position_ids"].transpose(1, 0)
-        else:
+        if self.model_type == ERNIE4_5_VL:
+            outputs["mm_num_token_func"] = self._mm_num_tokens_ernie
             outputs["position_ids"] = np.array(outputs["position_ids"], dtype=np.int64)
             outputs["image_patch_id"] = self.image_patch_id
+        else:
+            outputs["mm_num_token_func"] = self._mm_num_tokens_qwen
+            outputs["position_ids"] = np.concatenate(outputs["position_ids"], axis=1, dtype=np.int64)
+            outputs["image_patch_id"] = (
+                self.image_token_id if self.model_type in (QWEN_VL, QWEN3_VL) else self.image_patch_id
+            )
+            outputs["video_patch_id"] = self.video_token_id
+            outputs["position_ids"] = outputs["position_ids"].transpose(1, 0)
 
         return outputs
