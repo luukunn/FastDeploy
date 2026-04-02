@@ -149,10 +149,6 @@ class MultiModalProcessor(BaseTextProcessor):
             self._init_ernie_token_type_mapping()
         self.limit_mm_per_prompt = self._parse_limits(limit_mm_per_prompt)
 
-    # ------------------------------------------------------------------ #
-    #  Initialization helpers
-    # ------------------------------------------------------------------ #
-
     def _load_tokenizer(self):
         """Load the appropriate tokenizer based on model_type."""
         if self.tokenizer_type == "ernie4_5":
@@ -287,10 +283,6 @@ class MultiModalProcessor(BaseTextProcessor):
             self._token_type_mapping[token] = IDS_TYPE_FLAG["image"]
         self._token_type_mapping[self.image_patch_id] = IDS_TYPE_FLAG["image"]
 
-    # ------------------------------------------------------------------ #
-    #  Config / limits parsing
-    # ------------------------------------------------------------------ #
-
     def _parse_processor_kwargs(self, kwargs: Optional[dict]) -> dict:
         """Parse and validate multimodal processor kwargs."""
         if not kwargs:
@@ -354,10 +346,6 @@ class MultiModalProcessor(BaseTextProcessor):
                 if len(data) > limit:
                     raise ValueError(f"Too many {modality} items in prompt, " f"got {len(data)} but limit is {limit}")
 
-    # ------------------------------------------------------------------ #
-    #  Token counting
-    # ------------------------------------------------------------------ #
-
     @staticmethod
     def _mm_num_tokens_qwen(grid_thw):
         """Calculate token count for qwen-family models (merge_size=2, no temporal downsampling)."""
@@ -420,10 +408,6 @@ class MultiModalProcessor(BaseTextProcessor):
             seq_len,
         )
         return {"image": max_image_tokens, "video": max_video_tokens}
-
-    # ------------------------------------------------------------------ #
-    #  Request processing pipeline
-    # ------------------------------------------------------------------ #
 
     def process_request_dict(self, request, max_model_len=None):
         request = self._apply_default_parameters(request)
@@ -568,10 +552,6 @@ class MultiModalProcessor(BaseTextProcessor):
             self.model_status_dict[request["request_id"]] = model_status
         request["enable_thinking"] = model_status == "think_start"
 
-    # ------------------------------------------------------------------ #
-    #  Completion tokens & output packing
-    # ------------------------------------------------------------------ #
-
     def append_completion_tokens(self, multimodal_inputs, completion_token_ids):
         if self.model_type == ERNIE4_5_VL:
             self._append_completion_tokens_ernie(multimodal_inputs, completion_token_ids)
@@ -625,10 +605,6 @@ class MultiModalProcessor(BaseTextProcessor):
 
         return outputs
 
-    # ------------------------------------------------------------------ #
-    #  Processor cache helpers
-    # ------------------------------------------------------------------ #
-
     def _get_processor_cache(self, socket, mm_hashes: list) -> list:
         req = pickle.dumps(mm_hashes)
         socket.send_multipart([b"", req])
@@ -661,10 +637,6 @@ class MultiModalProcessor(BaseTextProcessor):
             items_to_cache.append((outputs["images"][idx], meta))
         if hashes_to_cache:
             self._update_processor_cache(dealer, hashes_to_cache, items_to_cache)
-
-    # ------------------------------------------------------------------ #
-    #  Core encoding: text2ids / request2ids / prompt_token_ids2outputs
-    # ------------------------------------------------------------------ #
 
     def _make_outputs(self) -> dict:
         """Create a fresh outputs dict for encoding."""
@@ -977,10 +949,6 @@ class MultiModalProcessor(BaseTextProcessor):
 
         return outputs
 
-    # ------------------------------------------------------------------ #
-    #  Text encoding
-    # ------------------------------------------------------------------ #
-
     def _add_text(self, tokens, outputs: Dict) -> None:
         if not tokens:
             return None
@@ -1009,10 +977,6 @@ class MultiModalProcessor(BaseTextProcessor):
         text_array = np.arange(num_tokens).reshape(1, -1)
         text_index = np.broadcast_to(text_array, (3, num_tokens))
         return text_index + start_pos
-
-    # ------------------------------------------------------------------ #
-    #  Image encoding
-    # ------------------------------------------------------------------ #
 
     def _add_image(self, img, outputs: Dict, uuid: Optional[str], token_len=None) -> None:
         if self.model_type == ERNIE4_5_VL:
@@ -1126,10 +1090,6 @@ class MultiModalProcessor(BaseTextProcessor):
 
         if self.model_type in _QWEN_FAMILY:
             outputs["fps"].append(0)
-
-    # ------------------------------------------------------------------ #
-    #  Video encoding
-    # ------------------------------------------------------------------ #
 
     def _add_video(self, frames, outputs: Dict, uuid: Optional[str], token_len=None, *, meta=None) -> None:
         if self.model_type == ERNIE4_5_VL:
@@ -1257,10 +1217,6 @@ class MultiModalProcessor(BaseTextProcessor):
             outputs["cur_position"] = pos_ids.max() + 1
             outputs["fps"].append(fps)
 
-    # ------------------------------------------------------------------ #
-    #  Position computation
-    # ------------------------------------------------------------------ #
-
     def _compute_vision_positions_qwen(
         self, start_pos: int, t: int, h: int, w: int, second_per_grid_t: float
     ) -> np.ndarray:
@@ -1292,10 +1248,6 @@ class MultiModalProcessor(BaseTextProcessor):
 
         coords = list(zip(time_idx, h_idx, w_idx))
         return [[start_idx + ti, start_idx + hi, start_idx + wi] for ti, hi, wi in coords]
-
-    # ------------------------------------------------------------------ #
-    #  Video loading
-    # ------------------------------------------------------------------ #
 
     def _load_and_process_video(self, url, item: Dict):
         """Load and preprocess video. Returns model-type-appropriate result."""
