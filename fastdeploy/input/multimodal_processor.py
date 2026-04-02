@@ -72,8 +72,6 @@ _ERNIE_EXPECTED_KWARGS = {
     "video_fps": int,
 }
 
-_TYPES_ACCEPT_URL_SUFFIX = {QWEN_VL, QWEN3_VL, PADDLEOCR_VL}
-
 _DEFAULT_MM_LIMITS = {"image": 1, "video": 1, "audio": 1}
 
 _SAMPLING_EPS = 1e-5
@@ -138,10 +136,6 @@ class MultiModalProcessor(MultiModalEncoderMixin, BaseTextProcessor):
             self._init_ernie_pixel_params(processor_kwargs)
             self._init_ernie_token_type_mapping()
         self.limit_mm_per_prompt = self._parse_limits(limit_mm_per_prompt)
-
-    # ------------------------------------------------------------------
-    # Initialisation helpers
-    # ------------------------------------------------------------------
 
     def _load_tokenizer(self):
         """Load the appropriate tokenizer based on model_type."""
@@ -277,10 +271,6 @@ class MultiModalProcessor(MultiModalEncoderMixin, BaseTextProcessor):
             self._token_type_mapping[token] = IDS_TYPE_FLAG["image"]
         self._token_type_mapping[self.image_patch_id] = IDS_TYPE_FLAG["image"]
 
-    # ------------------------------------------------------------------
-    # Config parsing
-    # ------------------------------------------------------------------
-
     def _parse_processor_kwargs(self, kwargs: Optional[dict]) -> dict:
         """Parse and validate multimodal processor kwargs."""
         if not kwargs:
@@ -323,42 +313,26 @@ class MultiModalProcessor(MultiModalEncoderMixin, BaseTextProcessor):
             data_processor_logger.warning(f"Invalid limit-mm-per-prompt format: {e}, using default limits")
             return dict(_DEFAULT_MM_LIMITS)
 
-    # ------------------------------------------------------------------
-    # MM limit checking
-    # ------------------------------------------------------------------
-
     def _check_mm_limits(self, item):
         """Validate multimodal inputs against configured limits."""
         if isinstance(item, dict):
             mm_data = item
         else:
             mm_data = {"image": [], "video": []}
-            accept_url_suffix = self.model_type in _TYPES_ACCEPT_URL_SUFFIX
-
             for message in item:
                 if isinstance(message.get("content"), list):
                     for part in message["content"]:
                         part_type = part.get("type")
-                        if accept_url_suffix:
-                            if part_type in ("image_url", "image"):
-                                mm_data["image"].append(part)
-                            elif part_type in ("video_url", "video"):
-                                mm_data["video"].append(part)
-                        else:
-                            if part_type == "image":
-                                mm_data["image"].append(part)
-                            elif part_type == "video":
-                                mm_data["video"].append(part)
+                        if part_type in ("image_url", "image"):
+                            mm_data["image"].append(part)
+                        elif part_type in ("video_url", "video"):
+                            mm_data["video"].append(part)
 
         for modality, data in mm_data.items():
             if modality in self.limit_mm_per_prompt:
                 limit = self.limit_mm_per_prompt[modality]
                 if len(data) > limit:
                     raise ValueError(f"Too many {modality} items in prompt, " f"got {len(data)} but limit is {limit}")
-
-    # ------------------------------------------------------------------
-    # mm_num_tokens — static, model-type-aware
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _mm_num_tokens_qwen(grid_thw):
@@ -395,10 +369,6 @@ class MultiModalProcessor(MultiModalEncoderMixin, BaseTextProcessor):
             return [calc_one(x) for x in grid_thw]
         return calc_one(grid_thw)
 
-    # ------------------------------------------------------------------
-    # get_mm_max_tokens_per_item
-    # ------------------------------------------------------------------
-
     def get_mm_max_tokens_per_item(self, seq_len: int) -> Optional[Mapping[str, int]]:
         if self.model_type != ERNIE4_5_VL:
             return None
@@ -426,10 +396,6 @@ class MultiModalProcessor(MultiModalEncoderMixin, BaseTextProcessor):
             seq_len,
         )
         return {"image": max_image_tokens, "video": max_video_tokens}
-
-    # ------------------------------------------------------------------
-    # process_request_dict
-    # ------------------------------------------------------------------
 
     def process_request_dict(self, request, max_model_len=None):
         request = self._apply_default_parameters(request)
@@ -574,10 +540,6 @@ class MultiModalProcessor(MultiModalEncoderMixin, BaseTextProcessor):
             self.model_status_dict[request["request_id"]] = model_status
         request["enable_thinking"] = model_status == "think_start"
 
-    # ------------------------------------------------------------------
-    # Completion token appending
-    # ------------------------------------------------------------------
-
     def append_completion_tokens(self, multimodal_inputs, completion_token_ids):
         if self.model_type == ERNIE4_5_VL:
             self._append_completion_tokens_ernie(multimodal_inputs, completion_token_ids)
@@ -602,10 +564,6 @@ class MultiModalProcessor(MultiModalEncoderMixin, BaseTextProcessor):
         for i in range(num_tokens):
             multimodal_inputs["position_ids"].append([start + i] * 3)
         multimodal_inputs["cur_position"] += num_tokens
-
-    # ------------------------------------------------------------------
-    # pack_outputs
-    # ------------------------------------------------------------------
 
     def pack_outputs(self, outputs):
         if not outputs["images"]:

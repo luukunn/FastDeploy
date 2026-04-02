@@ -68,10 +68,6 @@ class MultiModalEncoderMixin:
     ``self.encoding_tokenizer``, ``self.image_processor``, etc.).
     """
 
-    # ------------------------------------------------------------------
-    # Processor cache helpers
-    # ------------------------------------------------------------------
-
     def _get_processor_cache(self, socket, mm_hashes: list) -> list:
         req = pickle.dumps(mm_hashes)
         socket.send_multipart([b"", req])
@@ -84,10 +80,6 @@ class MultiModalEncoderMixin:
         req = pickle.dumps((mm_hashes, mm_items))
         socket.send_multipart([b"", req])
         data_processor_logger.info(f"Update cache of mm_hashes: {mm_hashes}")
-
-    # ------------------------------------------------------------------
-    # Outputs dict factory
-    # ------------------------------------------------------------------
 
     def _make_outputs(self) -> dict:
         """Create a fresh outputs dict for encoding."""
@@ -112,10 +104,6 @@ class MultiModalEncoderMixin:
             outputs["vit_seqlen"] = []
             outputs["vit_position_ids"] = []
         return outputs
-
-    # ------------------------------------------------------------------
-    # text2ids — unified placeholder scanning
-    # ------------------------------------------------------------------
 
     def text2ids(self, text, images=None, videos=None, image_uuid=None, video_uuid=None):
         outputs = self._make_outputs()
@@ -174,10 +162,6 @@ class MultiModalEncoderMixin:
 
         return outputs
 
-    # ------------------------------------------------------------------
-    # _extract_mm_items — shared helper
-    # ------------------------------------------------------------------
-
     def _extract_mm_items(self, request):
         """Parse messages and extract multimodal items, handling cache retrieval."""
         messages = parse_chat_messages(request.get("messages"))
@@ -227,10 +211,6 @@ class MultiModalEncoderMixin:
 
         return images, videos, image_uuid, video_uuid, dealer, missing_idx, mm_items
 
-    # ------------------------------------------------------------------
-    # request2ids — unified
-    # ------------------------------------------------------------------
-
     def request2ids(self, request):
         images, videos, image_uuid, video_uuid, dealer, missing_idx, mm_items = self._extract_mm_items(request)
 
@@ -262,20 +242,12 @@ class MultiModalEncoderMixin:
 
         return outputs
 
-    # ------------------------------------------------------------------
-    # prompt_token_ids2outputs — dispatcher
-    # ------------------------------------------------------------------
-
     def prompt_token_ids2outputs(self, request):
         """Dispatch to model-type-specific prompt_token_ids scanner."""
         if self.model_type == ERNIE4_5_VL:
             return self._prompt_token_ids2outputs_ernie(request)
         else:
             return self._prompt_token_ids2outputs_qwen3(request)
-
-    # ------------------------------------------------------------------
-    # prompt_token_ids2outputs — qwen3 variant (scan by image_token_id runs)
-    # ------------------------------------------------------------------
 
     def _prompt_token_ids2outputs_qwen3(self, request):
         outputs = self._make_outputs()
@@ -336,10 +308,6 @@ class MultiModalEncoderMixin:
             self._update_cache_after_encoding(dealer, missing_idx, mm_items, outputs)
 
         return outputs
-
-    # ------------------------------------------------------------------
-    # prompt_token_ids2outputs — ernie variant (scan by START/END boundaries)
-    # ------------------------------------------------------------------
 
     def _prompt_token_ids2outputs_ernie(self, request):
         outputs = self._make_outputs()
@@ -424,10 +392,6 @@ class MultiModalEncoderMixin:
 
         return outputs
 
-    # ------------------------------------------------------------------
-    # Cache update after encoding
-    # ------------------------------------------------------------------
-
     def _update_cache_after_encoding(self, dealer, missing_idx, mm_items, outputs):
         missing_idx = set(missing_idx)
         hashes_to_cache, items_to_cache = [], []
@@ -447,10 +411,6 @@ class MultiModalEncoderMixin:
             items_to_cache.append((outputs["images"][idx], meta))
         if hashes_to_cache:
             self._update_processor_cache(dealer, hashes_to_cache, items_to_cache)
-
-    # ------------------------------------------------------------------
-    # _add_text
-    # ------------------------------------------------------------------
 
     def _add_text(self, tokens, outputs: Dict) -> None:
         if not tokens:
@@ -480,10 +440,6 @@ class MultiModalEncoderMixin:
         text_array = np.arange(num_tokens).reshape(1, -1)
         text_index = np.broadcast_to(text_array, (3, num_tokens))
         return text_index + start_pos
-
-    # ------------------------------------------------------------------
-    # _add_image
-    # ------------------------------------------------------------------
 
     def _add_image(self, img, outputs: Dict, uuid: Optional[str], token_len=None) -> None:
         if self.model_type == ERNIE4_5_VL:
@@ -561,10 +517,6 @@ class MultiModalEncoderMixin:
         outputs["grid_thw"].append(ret["image_grid_thw"])
         outputs["image_type_ids"].append(0)
 
-    # ------------------------------------------------------------------
-    # _add_processed_image
-    # ------------------------------------------------------------------
-
     def _add_processed_image(
         self, img_cache: Tuple[np.ndarray, dict], outputs: Dict, uuid: str, token_len=None
     ) -> None:
@@ -601,10 +553,6 @@ class MultiModalEncoderMixin:
 
         if self.model_type in _QWEN_FAMILY:
             outputs["fps"].append(0)
-
-    # ------------------------------------------------------------------
-    # _add_video
-    # ------------------------------------------------------------------
 
     def _add_video(self, frames, outputs: Dict, uuid: Optional[str], token_len=None, *, meta=None) -> None:
         if self.model_type == ERNIE4_5_VL:
@@ -694,10 +642,6 @@ class MultiModalEncoderMixin:
         outputs["position_ids"].extend(pos_ids)
         outputs["cur_position"] = np.max(pos_ids) + 1
 
-    # ------------------------------------------------------------------
-    # _add_processed_video
-    # ------------------------------------------------------------------
-
     def _add_processed_video(
         self, frames_cache: Tuple[np.ndarray, dict], outputs: Dict, uuid: str, token_len=None
     ) -> None:
@@ -736,10 +680,6 @@ class MultiModalEncoderMixin:
             outputs["cur_position"] = pos_ids.max() + 1
             outputs["fps"].append(fps)
 
-    # ------------------------------------------------------------------
-    # Position computation
-    # ------------------------------------------------------------------
-
     def _compute_vision_positions_qwen(
         self, start_pos: int, t: int, h: int, w: int, second_per_grid_t: float
     ) -> np.ndarray:
@@ -771,10 +711,6 @@ class MultiModalEncoderMixin:
 
         coords = list(zip(time_idx, h_idx, w_idx))
         return [[start_idx + ti, start_idx + hi, start_idx + wi] for ti, hi, wi in coords]
-
-    # ------------------------------------------------------------------
-    # Video loading
-    # ------------------------------------------------------------------
 
     def _load_and_process_video(self, url, item: Dict):
         """Load and preprocess video. Returns model-type-appropriate result."""
