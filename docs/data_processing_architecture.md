@@ -13,56 +13,159 @@ vLLM 的数据处理架构负责将用户通过 OpenAI 兼容 API 发送的请�
 ## 2. 整体架构概览
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                       用户请求 (ChatCompletionRequest)                        │
-│      messages: [{role, content: [text, image_url, ...]}], tools, ...         │
-└──────────────────────────────────┬───────────────────────────────────────────┘
-                                   │
-                                   ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  ① API 层: OpenAIServingChat.create_chat_completion()                        │
-│     ├── 初始化 ReasoningParser                                                │
-│     ├── 调用 self.render_chat_request(request) ─────────────┐                 │
-│     │     ├── self._check_model(request)  模型校验            │                 │
-│     │     ├── self.engine_client.errored  引擎健康检查         │                 │
-│     │     └── self.openai_serving_render.render_chat(request)│                 │
-│     ├── 构建 SamplingParams                                  │                 │
-│     └── engine_client.generate(engine_prompt, ...)           │                 │
-└──────────────────────────────────────────────────────────────┼────────────────┘
-                                                               │
-                                   ┌───────────────────────────┘
-                                   ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  ② Render 服务层: OpenAIServingRender.render_chat()                          │
-│     ├── Mistral tokenizer 特殊处理                                            │
-│     ├── tool_choice / tool_parser 校验                                        │
-│     ├── validate_chat_template()                                              │
-│     └── self.preprocess_chat(request, ...)                                    │
-│           ├── 构建 ChatParams + TokenizeParams                                │
-│           └── renderer.render_chat_async([messages], chat_params, tok_params) │
-└──────────────────────────────────┬───────────────────────────────────────────┘
-                                   │
-                                   ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  ③ Renderer 渲染层: BaseRenderer.render_chat_async()                         │
-│     ├── Step 1: render_messages_async()  → 消息解析+chat template+mm_data提取 │
-│     ├── Step 2: tokenize_prompts_async() → 文本 tokenization                  │
-│     ├── Step 3: _apply_prompt_extras()   → 附加 mm_processor_kwargs 等        │
-│     └── Step 4: process_for_engine_async() → 多模态处理 + 组装引擎输入         │
-└──────────────────────────────────┬───────────────────────────────────────────┘
-                                   │ (Step 4 中如果有 multi_modal_data)
-                                   ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  ④ 多模态处理层: BaseMultiModalProcessor.apply()                              │
-│     ├── _call_hf_processor()  → 调用 transformers ProcessorMixin              │
-│     ├── 计算 mm_placeholders（占位符位置）                                      │
-│     └── 组装 MultiModalInputs                                                │
-└──────────────────────────────────┬───────────────────────────────────────────┘
-                                   │
-                                   ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  ⑤ 引擎层: EngineClient.generate(engine_prompt, sampling_params, ...)        │
-└──────────────────────────────────────────────────────────────────────────────┘
+                           ┌─────────────────────────┐
+                           │   用户 HTTP 请求            │
+                           │   POST /v1/chat/completions│
+                           └────────────┬────────────┘
+                                        │
+                    ┌───────────────────▼───────────────────────┐
+                    │        HTTP Server (FastAPI)               │
+                    │  ┌─────────────────────────────────────┐  │
+                    │  │ OpenAI Protocol 解析                  │  │
+                    │  │ (protocol.py → ChatCompletionRequest) │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ① API 层                             │  │
+                    │  │ OpenAIServingChat                    │  │
+                    │  │   .create_chat_completion()          │  │
+                    │  │ ├── 初始化 ReasoningParser            │  │
+                    │  │ ├── render_chat_request(request)     │  │
+                    │  │ │     → 委托 OpenAIServingRender     │  │
+                    │  │ ├── 构建 SamplingParams               │  │
+                    │  │ └── → EngineCoreRequest              │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ② Render 服务层                      │  │
+                    │  │ OpenAIServingRender.render_chat()    │  │
+                    │  │ ├── Mistral tokenizer 特殊处理       │  │
+                    │  │ ├── tool_choice / tool_parser 校验   │  │
+                    │  │ ├── validate_chat_template()         │  │
+                    │  │ └── preprocess_chat(request, ...)    │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ③ Renderer 渲染层                    │  │
+                    │  │ BaseRenderer.render_chat_async()     │  │
+                    │  │ ├── Step1: render_messages_async()   │  │
+                    │  │ │   → 消息解析+chat template+mm提取  │  │
+                    │  │ ├── Step2: tokenize_prompts_async()  │  │
+                    │  │ │   → 文本 tokenization              │  │
+                    │  │ ├── Step3: _apply_prompt_extras()    │  │
+                    │  │ │   → 附加 mm_processor_kwargs       │  │
+                    │  │ └── Step4: process_for_engine_async()│  │
+                    │  │     → 多模态处理 + 组装引擎输入       │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ④ 多模态处理层 (可选)                │  │
+                    │  │ BaseMultiModalProcessor.apply()      │  │
+                    │  │ ├── _call_hf_processor()             │  │
+                    │  │ │   → transformers ProcessorMixin    │  │
+                    │  │ ├── 计算 mm_placeholders             │  │
+                    │  │ └── → MultiModalInputs               │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ⑤ 引擎前端: AsyncLLM (EngineClient) │  │
+                    │  │ AsyncLLM.generate()                  │  │
+                    │  │ ├── input_processor.process_inputs() │  │
+                    │  │ │   → EngineInput → EngineCoreRequest│  │
+                    │  │ ├── output_processor.add_request()   │  │
+                    │  │ │   → 注册 RequestState + Detokenizer│  │
+                    │  │ ├── engine_core.add_request_async()  │  │
+                    │  │ │   → ZMQ 发送到 EngineCore 进程     │  │
+                    │  │ └── 等待 RequestOutputCollector 队列  │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    └───────────────────┬─┘──────────────────────┘
+                                        │ ZMQ IPC
+                    ┌───────────────────▼───────────────────────┐
+                    │        EngineCore (后台进程)                │
+                    │  ┌─────────────────────────────────────┐  │
+                    │  │ 接收请求 → 创建 Request 对象          │  │
+                    │  │ (core.py: _handle_client_request)    │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ⑥ Scheduler 调度                     │  │
+                    │  │ Scheduler.schedule()                 │  │
+                    │  │ ├── 调度 RUNNING 请求 (decode)        │  │
+                    │  │ ├── 恢复 PREEMPTED 请求 (swap-in)     │  │
+                    │  │ ├── 调度 WAITING 新请求 (prefill)     │  │
+                    │  │ │   ├── KV Cache Block 分配           │  │
+                    │  │ │   ├── 前缀缓存匹配                  │  │
+                    │  │ │   └── Token Budget 控制             │  │
+                    │  │ └── → SchedulerOutput                │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ⑦ Executor 执行                      │  │
+                    │  │ Executor.execute_model()             │  │
+                    │  │ → GPUWorker.execute_model()          │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ⑧ GPUModelRunner 模型推理             │  │
+                    │  │ GPUModelRunner.execute_model()       │  │
+                    │  │ ├── _update_states()                 │  │
+                    │  │ │   → 更新 InputBatch 持久状态        │  │
+                    │  │ ├── _prepare_inputs()                │  │
+                    │  │ │   → 构建 input_ids, positions,     │  │
+                    │  │ │     attention_metadata 等 GPU 张量  │  │
+                    │  │ ├── _model_forward()                 │  │
+                    │  │ │   → model(input_ids, positions, ..)│  │
+                    │  │ │   → hidden_states                  │  │
+                    │  │ └── compute_logits()                 │  │
+                    │  │     → hidden_states → logits          │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ⑨ 采样 & 输出处理                    │  │
+                    │  │ GPUModelRunner.sample_tokens()       │  │
+                    │  │ ├── _sample(logits)                  │  │
+                    │  │ │   → Sampler: top-p/top-k/temp/...  │  │
+                    │  │ │   → sampled_token_ids              │  │
+                    │  │ ├── logprobs 计算 (可选)              │  │
+                    │  │ └── → ModelRunnerOutput              │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    │  ┌──────────────────▼──────────────────┐  │
+                    │  │ ⑩ Scheduler 状态更新                  │  │
+                    │  │ Scheduler.update_from_output()       │  │
+                    │  │ ├── 处理 sampled_token_ids            │  │
+                    │  │ ├── 判断 finish_reason               │  │
+                    │  │ │   (stop/length/abort/repetition)   │  │
+                    │  │ ├── 更新 Request 状态                 │  │
+                    │  │ └── → EngineCoreOutputs              │  │
+                    │  │     (每个请求一个 EngineCoreOutput)    │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    └───────────────────┬─┘──────────────────────┘
+                                        │ ZMQ IPC
+                    ┌───────────────────▼───────────────────────┐
+                    │    AsyncLLM 输出处理 (主进程)               │
+                    │  ┌─────────────────────────────────────┐  │
+                    │  │ ⑪ OutputProcessor (output_handler)   │  │
+                    │  │ output_processor.process_outputs()   │  │
+                    │  │ ├── 增量 Detokenize                  │  │
+                    │  │ │   token_ids → 文本                  │  │
+                    │  │ ├── Stop String 检测                  │  │
+                    │  │ ├── LogProbs 处理                     │  │
+                    │  │ ├── 构建 RequestOutput                │  │
+                    │  │ │   (CompletionOutput + usage + ...)  │  │
+                    │  │ └── queue.put(RequestOutput)          │  │
+                    │  │     → 推送到 RequestOutputCollector    │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    └───────────────────┬─┘──────────────────────┘
+                                        │
+                    ┌───────────────────▼───────────────────────┐
+                    │    API 层输出后处理 (OpenAIServingChat)     │
+                    │  ┌─────────────────────────────────────┐  │
+                    │  │ ⑫ 流式/非流式响应构建                 │  │
+                    │  │ ├── [流式] stream_generator()         │  │
+                    │  │ │   ├── ReasoningParser 推理链解析    │  │
+                    │  │ │   ├── ToolParser 工具调用解析        │  │
+                    │  │ │   └── SSE: data: {choices: [...]}  │  │
+                    │  │ ├── [非流式] full_generator()          │  │
+                    │  │ │   └── 聚合全部输出 → 完整 JSON       │  │
+                    │  │ └── LogProbs / Usage 构建             │  │
+                    │  └──────────────────┬──────────────────┘  │
+                    └───────────────────┬─┘──────────────────────┘
+                                        │
+                           ┌────────────▼────────────┐
+                           │   用户 HTTP 响应            │
+                           │   ChatCompletionResponse   │
+                           └─────────────────────────┘
 ```
 
 ---
