@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared video utilities: VideoReaderWrapper, read_video_decord, and sample_frames."""
+"""Shared video utilities: VideoReaderWrapper, read_video_decord, sample_frames, and ernie video tools."""
 
 import io
 import math
 import os
+import random
 from tempfile import NamedTemporaryFile as ntf
 from typing import Optional, Union
 
@@ -31,12 +32,11 @@ __all__ = [
     "sample_frames",
     "sample_frames_qwen",
     "sample_frames_paddleocr",
+    "get_frame_indices",
+    "read_frames_decord",
+    "render_frame_timestamp",
+    "timestamp_converting",
 ]
-
-
-# ---------------------------------------------------------------------------
-# VideoReaderWrapper
-# ---------------------------------------------------------------------------
 
 
 def _is_gif(data: bytes) -> bool:
@@ -117,11 +117,6 @@ class VideoReaderWrapper:
                 pass
 
 
-# ---------------------------------------------------------------------------
-# read_video_decord
-# ---------------------------------------------------------------------------
-
-
 def read_video_decord(video_path, save_to_disk: bool = False):
     """Load a video file and return (video_reader, video_meta, video_path).
 
@@ -140,11 +135,6 @@ def read_video_decord(video_path, save_to_disk: bool = False):
 
     video_meta = {"fps": fps, "duration": duration, "num_of_frame": vlen}
     return video_reader, video_meta, video_path
-
-
-# ---------------------------------------------------------------------------
-# sample_frames — qwen_vl variant
-# ---------------------------------------------------------------------------
 
 
 def sample_frames_qwen(
@@ -201,11 +191,6 @@ def sample_frames_qwen(
         indices = np.arange(0, total_num_frames).astype(np.int32)
 
     return indices
-
-
-# ---------------------------------------------------------------------------
-# sample_frames — paddleocr_vl / ernie4_5_vl variant
-# ---------------------------------------------------------------------------
 
 
 def sample_frames_paddleocr(
@@ -270,3 +255,221 @@ def sample_frames(
     if variant == "paddleocr":
         return sample_frames_paddleocr(frame_factor, min_frames, max_frames, metadata, fps, num_frames)
     raise ValueError(f"Unknown variant {variant!r}. Expected 'paddleocr' or 'qwen'.")
+
+
+def get_frame_indices(
+    vlen,
+    target_frames=-1,
+    target_fps=-1,
+    frames_sample="middle",
+    fix_start=None,
+    input_fps=-1,
+):
+    """Extract frame indices from a video using target_frames or target_fps.
+
+    Supports "rand", "middle", and "leading" sampling strategies.
+    """
+    assert frames_sample in ["rand", "middle", "leading"]
+    if target_frames > 0:
+        assert target_fps <= 0, "target_fps must be negative if target_frames is given."
+        if target_frames > vlen:
+            acc_samples = vlen
+            data_processor_logger.info(
+                f"target_frames={target_frames} is larger than video length {vlen}, "
+                f"will sample {acc_samples} frames."
+            )
+        else:
+            acc_samples = target_frames
+            data_processor_logger.debug(f"sampling at target_frames={target_frames}, frames_sample={frames_sample}")
+
+        intervals = np.linspace(start=0, stop=vlen, num=acc_samples + 1).astype(int)
+        ranges = []
+        for idx, interv in enumerate(intervals[:-1]):
+            ranges.append((interv, intervals[idx + 1] - 1))
+        if frames_sample == "rand":
+            try:
+                frame_indices = [random.choice(range(x[0], x[1])) for x in ranges]
+            except Exception:
+                frame_indices = np.random.permutation(vlen)[:acc_samples]
+                frame_indices.sort()
+                frame_indices = list(frame_indices)
+        elif fix_start is not None:
+            frame_indices = [x[0] + fix_start for x in ranges]
+        elif frames_sample == "leading":
+            frame_indices = [x[0] for x in ranges]
+        elif frames_sample == "middle":
+            frame_indices = [(x[0] + x[1]) // 2 for x in ranges]
+        else:
+            raise NotImplementedError
+
+    elif target_fps > 0:
+        assert target_frames <= 0, "target_frames must be negative if target_fps is given."
+        assert input_fps > 0, "input_fps must be provided if target_fps is given."
+        data_processor_logger.info(f"sampling at fps={target_fps}, frames_sample={frames_sample}")
+        duration = float(vlen) / input_fps
+        delta = 1 / target_fps
+        if frames_sample == "middle":
+            frame_seconds = np.arange(0 + delta / 2, duration + delta / 2, delta)
+        elif frames_sample == "leading":
+            frame_seconds = np.arange(0, duration, delta)
+        if frames_sample == "rand":
+            frame_seconds = np.arange(0 + delta / 2, duration + delta / 2, delta)
+            rand_offset = np.random.rand(*(frame_seconds.shape)) - 0.5
+            frame_seconds += rand_offset * delta
+        frame_indices = np.around(frame_seconds * input_fps).astype(int)
+        frame_indices = [e for e in frame_indices if e < vlen]
+
+    else:
+        raise ValueError("Must provide either positive target_fps or positive target_frames.")
+
+    return frame_indices
+
+
+def read_frames_decord(
+    video_path,
+    video_reader,
+    video_meta,
+    target_frames=-1,
+    target_fps=-1,
+    frames_sample="middle",
+    fix_start=None,
+    save_to_disk=False,
+    frame_indices=None,
+    tol=10,
+):
+    """Read frames from a video using decord with robust error fallback.
+
+    Returns (ret_images, frame_indices, timestamps).
+    """
+    from PIL import Image
+
+    if frame_indices is None:
+        frame_indices = get_frame_indices(
+            video_meta["num_of_frame"],
+            target_frames=target_frames,
+            target_fps=target_fps,
+            frames_sample=frames_sample,
+            fix_start=fix_start,
+            input_fps=video_meta["fps"],
+        )
+
+    frames = []
+    for frame_indice_index in range(0, len(frame_indices)):
+        frame_indice = frame_indices[frame_indice_index]
+        try:
+            frames.append(video_reader[frame_indice].asnumpy())
+        except Exception as e:
+            data_processor_logger.debug(f"encounter error when get frame: {frame_indice}, error: {e}")
+            previous_counter = 1
+            later_counter = 1
+            previous_after_flag = True
+            if frame_indice == 0 or frame_indice == len(video_reader) - 1:
+                cur_tol = tol * 2
+            else:
+                cur_tol = tol
+            while previous_counter < cur_tol or later_counter < cur_tol:
+                if previous_after_flag:
+                    if frame_indice - previous_counter < 0:
+                        previous_counter += 1
+                        previous_after_flag = not previous_after_flag
+                        continue
+                    try:
+                        frames.append(video_reader[frame_indice - previous_counter].asnumpy())
+                        data_processor_logger.info(
+                            f"replace {frame_indice}-th frame with {frame_indice-previous_counter}-th frame"
+                        )
+                        frame_indices[frame_indice_index] = frame_indice - previous_counter
+                        break
+                    except Exception as e:
+                        previous_counter += 1
+                        data_processor_logger.info(f"error: {e}")
+                else:
+                    if frame_indice + later_counter >= len(video_reader):
+                        later_counter += 1
+                        previous_after_flag = not previous_after_flag
+                        continue
+                    try:
+                        frames.append(video_reader[frame_indice + later_counter].asnumpy())
+                        data_processor_logger.info(
+                            f"replace {frame_indice}-th frame with {frame_indice+later_counter}-th frame"
+                        )
+                        frame_indices[frame_indice_index] = frame_indice + later_counter
+                        break
+                    except Exception:
+                        later_counter += 1
+                previous_after_flag = not previous_after_flag
+
+    frames = np.stack(frames, axis=0)
+    assert len(frames) == len(frame_indices), f"len(frames): {len(frames)} != len(frame_indices): {len(frame_indices)}"
+
+    ret = []
+    for idx, frame in enumerate(frames):
+        tmp = Image.fromarray(frame, "RGB")
+        ret.append(tmp)
+
+    time_stamps = [frame_idx * video_meta["duration"] / video_meta["num_of_frame"] for frame_idx in frame_indices]
+
+    return ret, frame_indices, time_stamps
+
+
+_FONT_DIR = os.path.join(os.path.dirname(__file__), "ernie4_5_vl_processor", "utils")
+_FONT_PATH = os.path.join(_FONT_DIR, "Roboto-Regular.ttf")
+
+
+def timestamp_converting(time_stamp_in_seconds):
+    """Convert timestamp from seconds to 'HH:MM:SS.ss' format."""
+    hours = 0
+    while time_stamp_in_seconds >= 3600:
+        hours += 1
+        time_stamp_in_seconds -= 3600
+    mins = 0
+    while time_stamp_in_seconds >= 60:
+        mins += 1
+        time_stamp_in_seconds -= 60
+    time_hours = f"{int(hours):02d}"
+    time_mins = f"{int(mins):02d}"
+    time_secs = f"{time_stamp_in_seconds:05.02f}"
+    return time_hours + ":" + time_mins + ":" + time_secs
+
+
+def _render_single_image_with_timestamp(image, number: str, rate: float, font_path: str = _FONT_PATH):
+    """Render a timestamp string on the top-left of a PIL Image."""
+    from PIL import ImageDraw, ImageFont
+
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    font_size = int(min(width, height) * rate)
+    outline_size = int(font_size * 0.1)
+    font = ImageFont.truetype(font_path, font_size)
+    x, y = 0, 0
+
+    draw.text(
+        (x, y),
+        number,
+        font=font,
+        fill=(0, 0, 0),
+        stroke_width=outline_size,
+        stroke_fill=(255, 255, 255),
+    )
+    return image
+
+
+def render_frame_timestamp(frame, timestamp, font_rate=0.1):
+    """Render a timestamp onto a video frame (PIL Image or ndarray).
+
+    Args:
+        frame: PIL.Image or ndarray (H, W, C)
+        timestamp: Timestamp in seconds
+        font_rate: Font size as fraction of min(width, height)
+
+    Returns:
+        PIL.Image with timestamp rendered
+    """
+    from PIL import Image
+
+    if isinstance(frame, np.ndarray):
+        frame = Image.fromarray(frame, "RGB")
+
+    time_stamp = "time: " + timestamp_converting(timestamp)
+    new_frame = _render_single_image_with_timestamp(frame, time_stamp, font_rate)
+    return new_frame
