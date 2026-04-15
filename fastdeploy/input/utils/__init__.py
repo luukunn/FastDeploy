@@ -1,4 +1,3 @@
-"""
 # Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,12 +11,31 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
 
-from .process import DataProcessor
-from .qwen3_vl_processor import Qwen3VLProcessor
+"""Utility package for fastdeploy.input — re-exports from sub-modules."""
+
+from fastdeploy.input.utils.common import (
+    IDS_TYPE_FLAG,
+    MAX_IMAGE_DIMENSION,
+    process_stop_token_ids,
+    validate_model_path,
+)
+from fastdeploy.input.utils.video import (
+    VideoReaderWrapper,
+    read_video_decord,
+    sample_frames,
+    sample_frames_paddleocr,
+    sample_frames_qwen,
+)
 
 __all__ = [
-    "DataProcessor",
-    "Qwen3VLProcessor",
+    "IDS_TYPE_FLAG",
+    "MAX_IMAGE_DIMENSION",
+    "process_stop_token_ids",
+    "validate_model_path",
+    "VideoReaderWrapper",
+    "read_video_decord",
+    "sample_frames",
+    "sample_frames_paddleocr",
+    "sample_frames_qwen",
 ]

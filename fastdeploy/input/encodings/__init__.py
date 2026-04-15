@@ -1,4 +1,3 @@
-"""
 # Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
 
-# Backward compatibility: this module has been migrated to
-# fastdeploy.input.image_processors.qwen3_processor
-# This file will be removed in a future version.
+"""Multimodal encoding strategies for VL model families."""
 
-from fastdeploy.input.image_processors.qwen3_processor import (  # noqa: F401
-    ImageProcessor,
-)
+from fastdeploy.input.encodings.base_encoding import BaseEncoding
+from fastdeploy.input.encodings.ernie_encoding import ErnieEncoding
+from fastdeploy.input.encodings.paddleocr_encoding import PaddleOCREncoding
+from fastdeploy.input.encodings.qwen_encoding import QwenEncoding
+from fastdeploy.input.encodings.registry import EncodingRegistry
+
+__all__ = ["BaseEncoding", "EncodingRegistry", "ErnieEncoding", "PaddleOCREncoding", "QwenEncoding"]

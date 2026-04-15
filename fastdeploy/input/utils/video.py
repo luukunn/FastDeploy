@@ -12,15 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared video utilities: VideoReaderWrapper, read_video_decord, and sample_frames."""
+"""Shared video utilities: VideoReaderWrapper, read_video_decord, sample_frames, read_frames_decord."""
 
+import datetime
+import hashlib
 import io
 import math
 import os
+import random
+import threading
+import uuid
 from tempfile import NamedTemporaryFile as ntf
 from typing import Optional, Union
 
 import numpy as np
+from PIL import Image
 
 from fastdeploy.input.image_processors.common import ceil_by_factor, floor_by_factor
 from fastdeploy.utils import data_processor_logger
@@ -31,6 +37,10 @@ __all__ = [
     "sample_frames",
     "sample_frames_qwen",
     "sample_frames_paddleocr",
+    "get_frame_indices",
+    "read_frames_decord",
+    "EXTRACTED_FRAME_DIR",
+    "get_filename",
 ]
 
 
@@ -270,3 +280,191 @@ def sample_frames(
     if variant == "paddleocr":
         return sample_frames_paddleocr(frame_factor, min_frames, max_frames, metadata, fps, num_frames)
     raise ValueError(f"Unknown variant {variant!r}. Expected 'paddleocr' or 'qwen'.")
+
+
+# ---------------------------------------------------------------------------
+# IO helpers (migrated from ernie4_5_vl_processor/utils/io_utils.py)
+# ---------------------------------------------------------------------------
+
+EXTRACTED_FRAME_DIR = "./download_tmp/extracted_frames/"
+
+
+def get_filename(url=None):
+    """Generate a unique filename, optionally based on a URL hash."""
+    if url is None:
+        return str(uuid.uuid4()).replace("-", "")
+    t = datetime.datetime.now()
+    if not isinstance(url, bytes):
+        url = url.encode("utf-8")
+
+    md5_hash = hashlib.md5(url).hexdigest()
+    pid = os.getpid()
+    tid = threading.get_ident()
+
+    image_filename = f"{t.year}-{t.month:02d}-{t.day:02d}-{pid}-{tid}-{md5_hash}"
+    return image_filename
+
+
+# ---------------------------------------------------------------------------
+# get_frame_indices / read_frames_decord
+# (migrated from ernie4_5_vl_processor/process_video.py)
+# ---------------------------------------------------------------------------
+
+
+def get_frame_indices(
+    vlen,
+    target_frames=-1,
+    target_fps=-1,
+    frames_sample="middle",
+    fix_start=None,
+    input_fps=-1,
+):
+    """Get frame indices for sampling from a video."""
+    assert frames_sample in ["rand", "middle", "leading"]
+    if target_frames > 0:
+        assert target_fps <= 0, "target_fps must be negative if target_frames is given."
+        if target_frames > vlen:
+            acc_samples = vlen
+            data_processor_logger.info(
+                f"target_frames={target_frames} is larger than video length {vlen}, "
+                f"will sample {acc_samples} frames."
+            )
+        else:
+            acc_samples = target_frames
+            data_processor_logger.debug(f"sampling at target_frames={target_frames}, frames_sample={frames_sample}")
+
+        intervals = np.linspace(start=0, stop=vlen, num=acc_samples + 1).astype(int)
+        ranges = []
+        for idx, interv in enumerate(intervals[:-1]):
+            ranges.append((interv, intervals[idx + 1] - 1))
+        if frames_sample == "rand":
+            try:
+                frame_indices = [random.choice(range(x[0], x[1])) for x in ranges]
+            except Exception:
+                frame_indices = np.random.permutation(vlen)[:acc_samples]
+                frame_indices.sort()
+                frame_indices = list(frame_indices)
+        elif fix_start is not None:
+            frame_indices = [x[0] + fix_start for x in ranges]
+        elif frames_sample == "leading":
+            frame_indices = [x[0] for x in ranges]
+        elif frames_sample == "middle":
+            frame_indices = [(x[0] + x[1]) // 2 for x in ranges]
+        else:
+            raise NotImplementedError
+
+    elif target_fps > 0:
+        assert target_frames <= 0, "target_frames must be negative if target_fps is given."
+        assert input_fps > 0, "input_fps must be provided if target_fps is given."
+        data_processor_logger.info(f"sampling at fps={target_fps}, frames_sample={frames_sample}")
+        duration = float(vlen) / input_fps
+        delta = 1 / target_fps
+        if frames_sample == "middle":
+            frame_seconds = np.arange(0 + delta / 2, duration + delta / 2, delta)
+        elif frames_sample == "leading":
+            frame_seconds = np.arange(0, duration, delta)
+        if frames_sample == "rand":
+            frame_seconds = np.arange(0 + delta / 2, duration + delta / 2, delta)
+            rand_offset = np.random.rand(*(frame_seconds.shape)) - 0.5
+            frame_seconds += rand_offset * delta
+        frame_indices = np.around(frame_seconds * input_fps).astype(int)
+        frame_indices = [e for e in frame_indices if e < vlen]
+
+    else:
+        raise ValueError("Must provide either positive target_fps or positive target_frames.")
+
+    return frame_indices
+
+
+def read_frames_decord(
+    video_path,
+    video_reader,
+    video_meta,
+    target_frames=-1,
+    target_fps=-1,
+    frames_sample="middle",
+    fix_start=None,
+    save_to_disk=False,
+    cache_dir=None,
+    frame_indices=None,
+    tol=10,
+):
+    """Read frames from a video using decord, with retry logic for corrupt frames."""
+    if cache_dir is None:
+        cache_dir = EXTRACTED_FRAME_DIR
+
+    if frame_indices is None:
+        frame_indices = get_frame_indices(
+            video_meta["num_of_frame"],
+            target_frames=target_frames,
+            target_fps=target_fps,
+            frames_sample=frames_sample,
+            fix_start=fix_start,
+            input_fps=video_meta["fps"],
+        )
+
+    frames = []
+    for frame_indice_index in range(0, len(frame_indices)):
+        frame_indice = frame_indices[frame_indice_index]
+        try:
+            frames.append(video_reader[frame_indice].asnumpy())
+        except Exception as e:
+            data_processor_logger.debug(f"encounter error when get frame: {frame_indice}, error: {e}")
+            previous_counter = 1
+            later_counter = 1
+            previous_after_flag = True
+            if frame_indice == 0 or frame_indice == len(video_reader) - 1:
+                cur_tol = tol * 2
+            else:
+                cur_tol = tol
+            while previous_counter < cur_tol or later_counter < cur_tol:
+                if previous_after_flag:
+                    if frame_indice - previous_counter < 0:
+                        previous_counter += 1
+                        previous_after_flag = not previous_after_flag
+                        continue
+                    try:
+                        frames.append(video_reader[frame_indice - previous_counter].asnumpy())
+                        data_processor_logger.info(
+                            f"replace {frame_indice}-th frame with {frame_indice-previous_counter}-th frame"
+                        )
+                        frame_indices[frame_indice_index] = frame_indice - previous_counter
+                        break
+                    except Exception as e:
+                        previous_counter += 1
+                        data_processor_logger.info(f"error: {e}")
+                else:
+                    if frame_indice + later_counter >= len(video_reader):
+                        later_counter += 1
+                        previous_after_flag = not previous_after_flag
+                        continue
+                    try:
+                        frames.append(video_reader[frame_indice + later_counter].asnumpy())
+                        data_processor_logger.info(
+                            f"replace {frame_indice}-th frame with {frame_indice+later_counter}-th frame"
+                        )
+                        frame_indices[frame_indice_index] = frame_indice + later_counter
+                        break
+                    except Exception:
+                        later_counter += 1
+                previous_after_flag = not previous_after_flag
+
+    frames = np.stack(frames, axis=0)
+    assert len(frames) == len(frame_indices), f"len(frames): {len(frames)} != len(frame_indices): {len(frame_indices)}"
+
+    ret = []
+
+    url_sha1 = get_filename()
+    for idx, frame in enumerate(frames):
+        tmp = Image.fromarray(frame, "RGB")
+        if save_to_disk:
+            save_path = os.path.join(cache_dir, f"{url_sha1}", f"{idx}.png")
+            if not os.path.exists(os.path.dirname(save_path)):
+                os.makedirs(os.path.dirname(save_path))
+            tmp.save(save_path)
+            tmp = save_path
+        ret.append(tmp)
+
+    time_stamps = [frame_idx * video_meta["duration"] / video_meta["num_of_frame"] for frame_idx in frame_indices]
+
+    return ret, frame_indices, time_stamps
