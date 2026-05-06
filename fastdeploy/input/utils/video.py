@@ -28,7 +28,7 @@ from typing import Optional, Union
 import numpy as np
 from PIL import Image
 
-from fastdeploy.input.image_processors.common import ceil_by_factor, floor_by_factor
+from fastdeploy.input.multimodal.common import ceil_by_factor, floor_by_factor
 from fastdeploy.utils import data_processor_logger
 
 __all__ = [

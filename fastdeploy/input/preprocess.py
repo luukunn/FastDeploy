@@ -92,8 +92,6 @@ class InputPreprocessor:
                 reasoning_parser_obj=reasoning_parser_obj,
                 tool_parser_obj=tool_parser_obj,
                 mm_processor_kwargs=self.mm_processor_kwargs,
-                enable_processor_cache=self.enable_processor_cache,
-                limit_mm_per_prompt=self.limit_mm_per_prompt,
             )
 
             # Attach multimodal processor if needed
@@ -105,6 +103,12 @@ class InputPreprocessor:
 
     def _create_mm_processor(self, architecture):
         """Create the appropriate MMProcessor subclass based on architecture."""
+        common_kwargs = {
+            "processor_kwargs": self.mm_processor_kwargs,
+            "limit_mm_per_prompt": self.limit_mm_per_prompt,
+            "enable_processor_cache": self.enable_processor_cache,
+        }
+
         if ErnieArchitectures.contains_ernie_arch(architecture):
             from fastdeploy.input.multimodal.ernie_vl import ErnieVLProcessor
             from fastdeploy.input.multimodal.image_processors.ernie import (
@@ -116,7 +120,7 @@ class InputPreprocessor:
                 tokenizer=self.processor.tokenizer,
                 image_processor=image_processor,
                 config=self.model_config,
-                processor_kwargs=self.mm_processor_kwargs,
+                **common_kwargs,
             )
         elif "PaddleOCRVL" in architecture:
             from fastdeploy.input.multimodal.image_processors.paddleocr import (
@@ -129,7 +133,7 @@ class InputPreprocessor:
                 tokenizer=self.processor.tokenizer,
                 image_processor=image_processor,
                 config=self.model_config,
-                processor_kwargs=self.mm_processor_kwargs,
+                **common_kwargs,
             )
         elif "Qwen3VL" in architecture:
             from fastdeploy.input.multimodal.image_processors.qwen3 import (
@@ -142,7 +146,7 @@ class InputPreprocessor:
                 tokenizer=self.processor.tokenizer,
                 image_processor=image_processor,
                 config=self.model_config,
-                processor_kwargs=self.mm_processor_kwargs,
+                **common_kwargs,
             )
         elif "Qwen2_5_VL" in architecture:
             from fastdeploy.input.multimodal.image_processors.qwen import (
@@ -155,7 +159,7 @@ class InputPreprocessor:
                 tokenizer=self.processor.tokenizer,
                 image_processor=image_processor,
                 config=self.model_config,
-                processor_kwargs=self.mm_processor_kwargs,
+                **common_kwargs,
             )
         else:
             raise ValueError(f"Unsupported model processor architecture: {architecture}. ")

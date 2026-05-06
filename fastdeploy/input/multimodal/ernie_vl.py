@@ -60,8 +60,10 @@ class ErnieVLProcessor(MMProcessor):
     # ------------------------------------------------------------------
     # Init
     # ------------------------------------------------------------------
-    def __init__(self, tokenizer, image_processor, config=None, processor_kwargs=None):
-        super().__init__(tokenizer, image_processor, config, processor_kwargs)
+    def __init__(self, tokenizer, image_processor, config=None, processor_kwargs=None,
+                 limit_mm_per_prompt=None, enable_processor_cache=False):
+        super().__init__(tokenizer, image_processor, config, processor_kwargs,
+                         limit_mm_per_prompt, enable_processor_cache)
         # Conv params from processor_kwargs (ernie-specific)
         if processor_kwargs is None:
             processor_kwargs = {}

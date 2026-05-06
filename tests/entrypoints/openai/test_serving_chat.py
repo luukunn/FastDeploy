@@ -1667,13 +1667,11 @@ class TestOpenAIServingCompletion(unittest.IsolatedAsyncioTestCase):
         mock_dealer.write.assert_called_once_with([b"", f"{request_id}_0".encode("utf-8")])
 
 
-class TestLogprobsWithMultiModalProcessor(unittest.TestCase):
-    """Regression tests: process_logprob_response must be accessible via MultiModalProcessor.
+class TestLogprobsWithProcessor(unittest.TestCase):
+    """Regression tests: process_logprob_response must be accessible via Processor.
 
     Previously, process_logprob_response was only defined in TextProcessor.
-    MultiModalProcessor inherits directly from BaseTextProcessor, so it would
-    raise AttributeError when serving_chat.py called
-    engine_client.data_processor.process_logprob_response(...) on multimodal paths.
+    This test ensures the unified Processor class exposes the method correctly.
     """
 
     def setUp(self):
@@ -1688,13 +1686,13 @@ class TestLogprobsWithMultiModalProcessor(unittest.TestCase):
         )
 
         # Replace the auto-created MagicMock data_processor with a real
-        # MultiModalProcessor instance (with __init__ bypassed) so that
+        # Processor instance (with __init__ bypassed) so that
         # any missing method would surface as AttributeError instead of
         # silently succeeding via MagicMock auto-attribute creation.
-        from fastdeploy.input.multimodal_processor import MultiModalProcessor
+        from fastdeploy.input.processor import Processor
 
-        with patch.object(MultiModalProcessor, "__init__", return_value=None):
-            mm_proc = MultiModalProcessor.__new__(MultiModalProcessor)
+        with patch.object(Processor, "__init__", return_value=None):
+            mm_proc = Processor.__new__(Processor)
         mm_proc.tokenizer = MagicMock()
         mm_proc.tokenizer.decode = MagicMock(return_value="tok")
         self.chat_completion_handler.engine_client.data_processor = mm_proc

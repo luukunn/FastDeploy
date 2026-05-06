@@ -57,8 +57,10 @@ class QwenVLProcessor(MMProcessor):
     # ------------------------------------------------------------------
     # Init
     # ------------------------------------------------------------------
-    def __init__(self, tokenizer, image_processor, config=None, processor_kwargs=None):
-        super().__init__(tokenizer, image_processor, config, processor_kwargs)
+    def __init__(self, tokenizer, image_processor, config=None, processor_kwargs=None,
+                 limit_mm_per_prompt=None, enable_processor_cache=False):
+        super().__init__(tokenizer, image_processor, config, processor_kwargs,
+                         limit_mm_per_prompt, enable_processor_cache)
         # tokens_per_second from vision config
         vision_config = getattr(config, "vision_config", None)
         self.tokens_per_second = getattr(vision_config, "tokens_per_second", 2)

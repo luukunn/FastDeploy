@@ -29,13 +29,10 @@ Usage:
     response = processor.process_response_dict(response_dict, stream=True)
 """
 
-import pickle
 from collections import OrderedDict
-from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import numpy as np
-import zmq
 from paddleformers.generation import GenerationConfig
 from paddleformers.transformers import Llama3Tokenizer, LlamaTokenizer
 
@@ -46,7 +43,6 @@ from fastdeploy.logger.request_logger import RequestLogLevel, log_request
 from fastdeploy.utils import data_processor_logger
 
 _SAMPLING_EPS = 1e-5
-_DEFAULT_MM_LIMITS = {"image": 1, "video": 1, "audio": 1}
 
 
 class Processor:
@@ -70,13 +66,9 @@ class Processor:
         reasoning_parser_obj=None,
         tool_parser_obj=None,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-        enable_processor_cache: bool = False,
-        limit_mm_per_prompt: Optional[Dict[str, Any]] = None,
     ):
         self.model_name_or_path = model_name_or_path
         self.tokenizer_type = tokenizer_type
-        self.enable_processor_cache = enable_processor_cache
-        self.limit_mm_per_prompt = self._parse_limits(limit_mm_per_prompt)
 
         # Multimodal processor (set externally by factory)
         self.mm_processor = None
@@ -221,42 +213,51 @@ class Processor:
     # ------------------------------------------------------------------
 
     def process_request_dict(self, request, max_model_len=None, **kwargs):
-        """Unified request pre-processing.
+        """请求处理完整全流程（文本模型和多模态模型统一编排）。
 
-        If mm_processor is attached and the request contains multimodal data,
-        delegates multimodal encoding to it. Otherwise handles text-only.
+        按设计文档 3.2 节实现。
         """
+        # Step 1: 采样默认值
         request = self._apply_default_parameters(request)
+
+        # Step 2: EOS token IDs
         if not request.get("eos_token_ids"):
             request["eos_token_ids"] = self.eos_token_ids
 
-        # Stop tokens
+        # Step 3: stop tokens
         process_stop_token_ids(request, self.update_stop_seq)
 
-        # Bad words
+        # Step 4: bad words
         bad_words = request.get("bad_words")
         bad_words_token_ids = request.get("bad_words_token_ids")
         if bad_words:
             bad_words_token_ids = self.update_bad_words(bad_words, bad_words_token_ids)
             request["bad_words_token_ids"] = bad_words_token_ids
 
-        # Logits processors
+        # Step 5: logits processor（thinking 相关）
         logits_processors_args = self._prepare_think_stop_sentence(
             request.get("logits_processors_args") or {}, max_model_len
         )
         request["logits_processors_args"] = logits_processors_args
 
-        # Route: multimodal or text-only tokenization
-        if self.mm_processor and self._has_multimodal_content(request):
-            self._process_multimodal_request(request, max_model_len)
-        else:
-            self._process_text_request(request, max_model_len)
+        # Step 6: messages → prompt + multimodal_data（通用预处理）
+        if request.get("messages") and not request.get("prompt") and not request.get("prompt_token_ids"):
+            self.process_messages(request)
 
-        # Truncation
+        # Step 7: tokenization（多模 or 纯文本）
+        multimodal_data = request.get("multimodal_data") or {}
+        has_mm = bool(multimodal_data.get("image") or multimodal_data.get("video"))
+
+        if self.mm_processor and has_mm:
+            self.mm_processor.process(request)
+        else:
+            self._tokenize_text_request(request, max_model_len)
+
+        # Step 9: 截断至 max_model_len
         if max_model_len is not None and len(request["prompt_token_ids"]) > max_model_len:
             request["prompt_token_ids"] = request["prompt_token_ids"][: max_model_len - 1]
 
-        # Thinking state
+        # Step 10: 更新 thinking prompt 状态
         logits_processors_args = self._update_thinking_prompt_state(
             request["prompt_token_ids"], request.get("logits_processors_args") or {}
         )
@@ -264,7 +265,7 @@ class Processor:
 
         request["prompt_token_ids_len"] = len(request["prompt_token_ids"])
 
-        # max_tokens
+        # Step 11: 计算并钳位 max_tokens
         max_tokens = max_model_len - len(request["prompt_token_ids"])
         if request.get("max_tokens") is None:
             request["max_tokens"] = max(1, max_tokens)
@@ -277,38 +278,87 @@ class Processor:
             request["top_p"] = _SAMPLING_EPS
             request["top_k"] = 1
 
-        # Default reasoning_max_tokens
+        # Step 12: reasoning_max_tokens 默认值
         if request.get("reasoning_max_tokens") is None:
             request["reasoning_max_tokens"] = max(int(request["max_tokens"] * 0.8), 1)
 
-        # Reasoning parser
+        # Step 14: reasoning parser
         if self.reasoning_parser:
             self._apply_reasoning_parser(request)
 
-        # Cap response_max_tokens when thinking disabled
+        # Step 15: cap response_max_tokens
         if request.get("response_max_tokens") is not None and request.get("enable_thinking") is False:
             request["max_tokens"] = min(request["response_max_tokens"], request["max_tokens"])
 
         log_request(RequestLogLevel.CONTENT, message="Processed request dict: {request}", request=request)
         return request
 
-    def _has_multimodal_content(self, request):
-        """Check if request contains multimodal content."""
-        if request.get("multimodal_data"):
-            return True
+    # ------------------------------------------------------------------
+    # process_messages: 通用消息预处理（设计文档 3.1 节）
+    # ------------------------------------------------------------------
+
+    def process_messages(self, request):
+        """将 messages 格式转换为 prompt + multimodal_data（通用，与模型无关）。
+
+        职责：
+        1. 从 messages 中提取多模态内容（图片/视频 URL 或 bytes）
+           → 写入 request["multimodal_data"] = {"image": [...], "video": [...]}
+        2. 调用 tokenizer.apply_chat_template(messages) 拼接 prompt
+           → 写入 request["prompt"]
+
+        调用时机：request 含 "messages" 且尚未有 "prompt" 时。
+        """
         messages = request.get("messages")
         if not messages:
-            return False
+            return request
+
+        # Step 1: 遍历 messages，提取多模态内容
+        images, videos = [], []
         for msg in messages:
             content = msg.get("content")
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") in ("image", "video", "image_url", "video_url"):
-                        return True
-        return False
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") in ("image", "image_url"):
+                        images.append(item)
+                    elif item.get("type") in ("video", "video_url"):
+                        videos.append(item)
 
-    def _process_text_request(self, request, max_model_len):
-        """Handle pure-text tokenization."""
+        if images or videos:
+            request["multimodal_data"] = {"image": images, "video": videos}
+
+        # Step 2: apply_chat_template → prompt
+        request.setdefault("enable_thinking", True)
+        chat_template_kwargs = request.get("chat_template_kwargs", {})
+        if chat_template_kwargs:
+            if isinstance(chat_template_kwargs, dict):
+                for k, v in chat_template_kwargs.items():
+                    if k not in request or request[k] is None:
+                        request[k] = v
+            else:
+                raise ValueError("Invalid input: chat_template_kwargs must be a dict")
+
+        if self.tokenizer.chat_template is None:
+            raise ValueError("This model does not support chat_template.")
+
+        parsed_messages = parse_chat_messages(messages)
+        prompt = self.tokenizer.apply_chat_template(
+            parsed_messages,
+            tokenize=False,
+            add_generation_prompt=request.get("add_generation_prompt", True),
+            **chat_template_kwargs,
+        )
+        request["prompt"] = prompt
+        request["prompt_tokens"] = prompt
+        return request
+
+    # ------------------------------------------------------------------
+    # _tokenize_text_request: 纯文本 tokenization
+    # ------------------------------------------------------------------
+
+    def _tokenize_text_request(self, request, max_model_len):
+        """Handle pure-text tokenization (or mm model with no mm data in this request)."""
         if not request.get("prompt_token_ids"):
             if request.get("prompt"):
                 prompt = request.get("prompt")
@@ -325,6 +375,7 @@ class Processor:
                         token_ids = token_ids.tolist()
                     request["prompt_token_ids"] = token_ids
             elif request.get("messages"):
+                # Messages not yet processed (no mm_processor case)
                 chat_template_kwargs = request.get("chat_template_kwargs", {})
                 if chat_template_kwargs:
                     if isinstance(chat_template_kwargs, dict):
@@ -343,198 +394,6 @@ class Processor:
 
         if request.get("completion_token_ids"):
             request["prompt_token_ids"].extend(request["completion_token_ids"])
-
-    def _process_multimodal_request(self, request, max_model_len):
-        """Handle multimodal request — delegate to mm_processor."""
-        request.setdefault("enable_thinking", True)
-
-        # Extract mm items and tokenize
-        if request.get("prompt_token_ids") and self.mm_processor._supports_prompt_token_ids:
-            outputs = self._mm_process_prompt_token_ids(request)
-        elif request.get("prompt"):
-            outputs = self._mm_process_prompt(request)
-        elif request.get("messages"):
-            outputs = self._mm_process_messages(request)
-        else:
-            raise ValueError(f"Request must contain 'prompt_token_ids', 'prompt', or 'messages': {request}")
-
-        # Post tokens (completion_token_ids)
-        completion_token_ids = request.get("completion_token_ids") or request.get("generated_token_ids")
-        if completion_token_ids:
-            self.mm_processor.append_completion_tokens(outputs, completion_token_ids)
-
-        # Pack outputs
-        outputs = self.mm_processor._pack_outputs(outputs)
-
-        # Write back
-        self.mm_processor._write_back(request, outputs)
-
-    def _mm_process_prompt_token_ids(self, request):
-        """Multimodal: prompt_token_ids path."""
-        prompt_token_ids = request.get("prompt_token_ids", [])
-        if not request.get("messages"):
-            return self.mm_processor.prompt_token_ids2outputs(prompt_token_ids)
-
-        images, videos, image_uuid, video_uuid, dealer, missing_idx, mm_items = self._extract_mm_items(request)
-        outputs = self.mm_processor.prompt_token_ids2outputs(prompt_token_ids, mm_items)
-
-        if self.enable_processor_cache and dealer:
-            self._update_mm_cache(dealer, missing_idx, mm_items, outputs)
-
-        return outputs
-
-    def _mm_process_prompt(self, request):
-        """Multimodal: prompt text path."""
-        multimodal_data = request.get("multimodal_data") or {}
-        self._check_mm_limits(multimodal_data)
-        images = multimodal_data.get("image", None)
-        videos = multimodal_data.get("video", None)
-        request["prompt_tokens"] = request.get("prompt")
-        return self.mm_processor._text2ids(request["prompt"], images, videos)
-
-    def _mm_process_messages(self, request):
-        """Multimodal: messages path (apply chat template then encode)."""
-        messages = request.get("messages")
-        self._check_mm_limits(messages)
-
-        images, videos, image_uuid, video_uuid, dealer, missing_idx, mm_items = self._extract_mm_items(request)
-
-        # Apply chat template
-        chat_template_kwargs = request.get("chat_template_kwargs", {})
-        if chat_template_kwargs:
-            if isinstance(chat_template_kwargs, dict):
-                for k, v in chat_template_kwargs.items():
-                    if k not in request or request[k] is None:
-                        request[k] = v
-            else:
-                raise ValueError("Invalid input: chat_template_kwargs must be a dict")
-
-        if self.tokenizer.chat_template is None:
-            raise ValueError("This model does not support chat template.")
-
-        parsed_messages = parse_chat_messages(request.get("messages"))
-        prompt = self.tokenizer.apply_chat_template(
-            parsed_messages,
-            tokenize=False,
-            add_generation_prompt=request.get("add_generation_prompt", True),
-            **chat_template_kwargs,
-        )
-        request["prompt_tokens"] = prompt
-
-        outputs = self.mm_processor._text2ids(prompt, images, videos, image_uuid, video_uuid)
-
-        if self.enable_processor_cache and dealer:
-            self._update_mm_cache(dealer, missing_idx, mm_items, outputs)
-
-        return outputs
-
-    # ------------------------------------------------------------------
-    # Multimodal helpers
-    # ------------------------------------------------------------------
-
-    def _extract_mm_items(self, request):
-        """Extract images/videos from request messages, handling processor cache."""
-        messages = parse_chat_messages(request.get("messages"))
-        mm_items = []
-
-        for msg in messages:
-            content = msg.get("content")
-            if not isinstance(content, list):
-                content = [content]
-            for item in content:
-                if isinstance(item, dict) and item.get("type") in ["image", "video"]:
-                    mm_items.append(item)
-
-        missing_hashes, missing_idx = [], []
-        for idx, item in enumerate(mm_items):
-            if not item.get("data"):
-                missing_hashes.append(item.get("uuid"))
-                missing_idx.append(idx)
-
-        if len(missing_hashes) > 0 and not self.enable_processor_cache:
-            raise ValueError("Missing items cannot be retrieved without processor cache.")
-
-        dealer = None
-        if self.enable_processor_cache:
-            context = zmq.Context()
-            dealer = context.socket(zmq.DEALER)
-            dealer.connect("ipc:///dev/shm/processor_cache.ipc")
-
-            from fastdeploy.input.multimodal.mm_processor import MMProcessor
-
-            missing_items = MMProcessor.get_processor_cache(dealer, missing_hashes)
-            for idx in range(len(missing_items)):
-                if not missing_items[idx]:
-                    raise ValueError(f"Missing item {idx} not found in processor cache")
-                mm_items[missing_idx[idx]]["data"] = missing_items[idx]
-
-        images, videos = [], []
-        image_uuid, video_uuid = [], []
-        for item in mm_items:
-            if item.get("type") == "image":
-                images.append(item["data"])
-                image_uuid.append(item.get("uuid"))
-            elif item.get("type") == "video":
-                videos.append(item["data"])
-                video_uuid.append(item.get("uuid"))
-            else:
-                raise ValueError(f"Unsupported multimodal type: {item.get('type')}")
-
-        return images, videos, image_uuid, video_uuid, dealer, missing_idx, mm_items
-
-    def _update_mm_cache(self, dealer, missing_idx, mm_items, outputs):
-        """Write newly-processed multimodal items to the processor cache."""
-        from fastdeploy.input.multimodal.mm_processor import MMProcessor
-
-        missing_idx_set = set(missing_idx)
-        hashes_to_cache, items_to_cache = [], []
-        for idx in range(len(mm_items)):
-            if idx in missing_idx_set:
-                continue
-            meta = {}
-            grid_thw = np.asarray(outputs["grid_thw"][idx])
-            if grid_thw.ndim > 1:
-                t, h, w = grid_thw[0]
-            else:
-                t, h, w = grid_thw
-            meta["thw"] = (int(t), int(h), int(w))
-            if "fps" in outputs:
-                meta["fps"] = outputs["fps"][idx]
-            hashes_to_cache.append(outputs["mm_hashes"][idx])
-            items_to_cache.append((outputs["images"][idx], meta))
-        if hashes_to_cache:
-            MMProcessor.update_processor_cache(dealer, hashes_to_cache, items_to_cache)
-
-    def _check_mm_limits(self, item):
-        """Validate multimodal item counts against configured limits."""
-        if isinstance(item, dict):
-            mm_data = item
-        else:
-            mm_data = {"image": [], "video": []}
-            for message in item:
-                if isinstance(message.get("content"), list):
-                    for part in message["content"]:
-                        part_type = part.get("type")
-                        if part_type in ("image_url", "image"):
-                            mm_data["image"].append(part)
-                        elif part_type in ("video_url", "video"):
-                            mm_data["video"].append(part)
-        for modality, data in mm_data.items():
-            if modality in self.limit_mm_per_prompt:
-                limit = self.limit_mm_per_prompt[modality]
-                if len(data) > limit:
-                    raise ValueError(f"Too many {modality} items in prompt, got {len(data)} but limit is {limit}")
-
-    def _parse_limits(self, limits: Optional[dict]) -> dict:
-        if not limits:
-            return dict(_DEFAULT_MM_LIMITS)
-        try:
-            if not isinstance(limits, dict):
-                raise ValueError("limit-mm-per-prompt must be a dictionary")
-            return {**_DEFAULT_MM_LIMITS, **limits}
-        except Exception as e:
-            data_processor_logger.warning(f"Invalid limit-mm-per-prompt format: {e}, using default limits")
-            return dict(_DEFAULT_MM_LIMITS)
 
     # ------------------------------------------------------------------
     # Multimodal delegate methods

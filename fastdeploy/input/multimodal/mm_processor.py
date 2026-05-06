@@ -59,7 +59,8 @@ class MMProcessor(ABC):
     # Whether this processor supports the prompt_token_ids path
     _supports_prompt_token_ids: bool = False
 
-    def __init__(self, tokenizer, image_processor, config=None, processor_kwargs=None):
+    def __init__(self, tokenizer, image_processor, config=None, processor_kwargs=None,
+                 limit_mm_per_prompt=None, enable_processor_cache=False):
         """Initialize the multimodal processor.
 
         Args:
@@ -67,6 +68,8 @@ class MMProcessor(ABC):
             image_processor: The image processor instance.
             config: Model config object (optional).
             processor_kwargs: Additional processor keyword arguments.
+            limit_mm_per_prompt: Per-modality limits for multimodal items.
+            enable_processor_cache: Whether to enable ZMQ-based processor cache.
         """
         if processor_kwargs is None:
             processor_kwargs = {}
@@ -74,6 +77,8 @@ class MMProcessor(ABC):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.config = config
+        self.enable_processor_cache = enable_processor_cache
+        self.limit_mm_per_prompt = self._parse_limits(limit_mm_per_prompt)
 
         # Special token IDs
         self.image_token_id = self.tokenizer.convert_tokens_to_ids(self.image_token_str)
@@ -99,42 +104,61 @@ class MMProcessor(ABC):
     # ------------------------------------------------------------------
     # Template method: process()
     # ------------------------------------------------------------------
-    def process(self, request, tokenizer, enable_processor_cache=False):
-        """Template method: full multimodal processing pipeline.
+    def process(self, request):
+        """多模态数据处理（对外唯一公开方法）。
 
-        Args:
-            request: The request dict containing messages/prompt/prompt_token_ids.
-            tokenizer: The tokenizer to use for text encoding.
-            enable_processor_cache: Whether to use ZMQ processor cache.
+        采用模板方法模式：基类提供完整的编排流程，子类通过覆写
+        钩子方法（_write_back）定制差异行为。
 
-        Returns:
-            dict: Packed multimodal outputs (input_ids, position_ids, images, etc.)
+        输入（从 request 读取，由 Processor.process_messages() 预先填充）：
+            request["prompt"]          : str（含 image/video placeholder 的拼接文本）
+            request["multimodal_data"] : {"image": [...], "video": [...]}
+            或
+            request["prompt_token_ids"] : List[int]（预分词路径）
+
+        写入内容：
+            request["prompt_token_ids"]    : List[int]
+            request["multimodal_inputs"]   : dict
         """
-        outputs = self._route_tokenization(request, enable_processor_cache)
+        # Step 1: 路由到 tokenization 路径
+        outputs = self._route_tokenization(request)
+        # Step 2: 追加 completion tokens（speculative decoding 用）
+        self._process_post_tokens(request, outputs)
+        # Step 3: 打包为 numpy
         outputs = self._pack_outputs(outputs)
+        # Step 4: 写回 request（子类可覆写此钩子定制差异行为）
         self._write_back(request, outputs)
-        return outputs
 
     # ------------------------------------------------------------------
     # Tokenization routing (common logic)
     # ------------------------------------------------------------------
-    def _route_tokenization(self, request, enable_processor_cache=False):
+    def _route_tokenization(self, request):
         """Route to the appropriate tokenization path.
 
-        Path A: prompt_token_ids already present
-        Path B: prompt text + multimodal_data
-        Path C: messages (needs chat template)
+        Path A: prompt_token_ids already present → _process_prompt_token_ids
+        Path B: prompt text + multimodal_data → _text2ids
         """
         if request.get("prompt_token_ids") and self._supports_prompt_token_ids:
-            return self._process_prompt_token_ids(request, enable_processor_cache)
+            return self._process_prompt_token_ids(request)
 
         if request.get("prompt"):
-            multimodal_data = request.get("multimodal_data") or {}
-            images = multimodal_data.get("image", None)
-            videos = multimodal_data.get("video", None)
+            mm_data = request.get("multimodal_data") or {}
+            images = mm_data.get("image", None)
+            videos = mm_data.get("video", None)
+            self._check_mm_limits(images, videos)
+            request["prompt_tokens"] = request["prompt"]
             return self._text2ids(request["prompt"], images, videos)
 
         raise ValueError("MMProcessor requires 'prompt_token_ids' or 'prompt' in request")
+
+    # ------------------------------------------------------------------
+    # Post tokens (completion_token_ids for speculative decoding)
+    # ------------------------------------------------------------------
+    def _process_post_tokens(self, request, outputs):
+        """Append completion_token_ids to outputs if present."""
+        completion_token_ids = request.get("completion_token_ids") or request.get("generated_token_ids")
+        if completion_token_ids:
+            self.append_completion_tokens(outputs, completion_token_ids)
 
     # ------------------------------------------------------------------
     # Text-to-IDs scanning loop
@@ -239,7 +263,7 @@ class MMProcessor(ABC):
     # ------------------------------------------------------------------
     # prompt_token_ids path
     # ------------------------------------------------------------------
-    def _process_prompt_token_ids(self, request, enable_processor_cache=False):
+    def _process_prompt_token_ids(self, request):
         """Handle the prompt_token_ids tokenization path.
 
         Subclasses that support this path must implement ``prompt_token_ids2outputs``.
@@ -263,6 +287,33 @@ class MMProcessor(ABC):
                     mm_items.append(item)
 
         return self.prompt_token_ids2outputs(prompt_token_ids, mm_items)
+
+    # ------------------------------------------------------------------
+    # Limits validation
+    # ------------------------------------------------------------------
+    def _parse_limits(self, limits: Optional[dict]) -> dict:
+        """Parse limit_mm_per_prompt into a normalized dict."""
+        _DEFAULT_MM_LIMITS = {"image": 1, "video": 1, "audio": 1}
+        if not limits:
+            return dict(_DEFAULT_MM_LIMITS)
+        try:
+            if not isinstance(limits, dict):
+                raise ValueError("limit-mm-per-prompt must be a dictionary")
+            return {**_DEFAULT_MM_LIMITS, **limits}
+        except Exception as e:
+            data_processor_logger.warning(f"Invalid limit-mm-per-prompt format: {e}, using default limits")
+            return dict(_DEFAULT_MM_LIMITS)
+
+    def _check_mm_limits(self, images, videos):
+        """Validate multimodal item counts against configured limits."""
+        if images and "image" in self.limit_mm_per_prompt:
+            limit = self.limit_mm_per_prompt["image"]
+            if len(images) > limit:
+                raise ValueError(f"Too many image items in prompt, got {len(images)} but limit is {limit}")
+        if videos and "video" in self.limit_mm_per_prompt:
+            limit = self.limit_mm_per_prompt["video"]
+            if len(videos) > limit:
+                raise ValueError(f"Too many video items in prompt, got {len(videos)} but limit is {limit}")
 
     # ------------------------------------------------------------------
     # Outputs initialisation

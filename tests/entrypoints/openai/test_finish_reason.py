@@ -30,14 +30,14 @@ from fastdeploy.entrypoints.openai.protocol import (
 )
 from fastdeploy.entrypoints.openai.serving_chat import OpenAIServingChat
 from fastdeploy.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from fastdeploy.input.multimodal_processor import MultiModalProcessor
+from fastdeploy.input.processor import Processor
 from fastdeploy.utils import data_processor_logger
 
 
-class TestMultiModalProcessorMaxTokens(IsolatedAsyncioTestCase):
+class TestProcessorMaxTokens(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        with patch.object(MultiModalProcessor, "__init__", return_value=None):
-            self.multi_modal_processor = MultiModalProcessor("model_path")
+        with patch.object(Processor, "__init__", return_value=None):
+            self.multi_modal_processor = Processor("model_path")
             self.multi_modal_processor.tokenizer = MagicMock()
             self.multi_modal_processor.tokenizer.eos_token_id = 102
             self.multi_modal_processor.tokenizer.pad_token_id = 0
