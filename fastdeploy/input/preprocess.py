@@ -83,45 +83,79 @@ class InputPreprocessor:
             )
         except Exception as e:
             logger.info(f"Plugin input processor not available ({e}), using built-in processor")
-            if not self.enable_mm_runtime:
-                from fastdeploy.input.text_processor import TextProcessor
+            from fastdeploy.input.processor import Processor
 
-                tokenizer_type = "ernie4_5" if ErnieArchitectures.contains_ernie_arch(architecture) else "auto"
-                self.processor = TextProcessor(
-                    model_name_or_path=self.model_name_or_path,
-                    tokenizer_type=tokenizer_type,
-                    reasoning_parser_obj=reasoning_parser_obj,
-                    tool_parser_obj=tool_parser_obj,
-                )
-            else:
-                from fastdeploy.input.mm_model_config import (
-                    ERNIE4_5_VL,
-                    PADDLEOCR_VL,
-                    QWEN3_VL,
-                    QWEN_VL,
-                )
-                from fastdeploy.input.multimodal_processor import MultiModalProcessor
+            tokenizer_type = "ernie4_5" if ErnieArchitectures.contains_ernie_arch(architecture) else "auto"
+            self.processor = Processor(
+                model_name_or_path=self.model_name_or_path,
+                tokenizer_type=tokenizer_type,
+                reasoning_parser_obj=reasoning_parser_obj,
+                tool_parser_obj=tool_parser_obj,
+                mm_processor_kwargs=self.mm_processor_kwargs,
+                enable_processor_cache=self.enable_processor_cache,
+                limit_mm_per_prompt=self.limit_mm_per_prompt,
+            )
 
-                if ErnieArchitectures.contains_ernie_arch(architecture):
-                    model_type = ERNIE4_5_VL
-                elif "PaddleOCRVL" in architecture:
-                    model_type = PADDLEOCR_VL
-                elif "Qwen2_5_VL" in architecture:
-                    model_type = QWEN_VL
-                elif "Qwen3VL" in architecture:
-                    model_type = QWEN3_VL
-                else:
-                    raise ValueError(f"Unsupported model processor architecture: {architecture}. ")
-
-                self.processor = MultiModalProcessor(
-                    model_name_or_path=self.model_name_or_path,
-                    model_type=model_type,
-                    config=self.model_config,
-                    limit_mm_per_prompt=self.limit_mm_per_prompt,
-                    mm_processor_kwargs=self.mm_processor_kwargs,
-                    reasoning_parser_obj=reasoning_parser_obj,
-                    tool_parser_obj=tool_parser_obj,
-                    enable_processor_cache=self.enable_processor_cache,
-                )
+            # Attach multimodal processor if needed
+            if self.enable_mm_runtime:
+                mm_processor = self._create_mm_processor(architecture)
+                self.processor.mm_processor = mm_processor
 
         return self.processor
+
+    def _create_mm_processor(self, architecture):
+        """Create the appropriate MMProcessor subclass based on architecture."""
+        if ErnieArchitectures.contains_ernie_arch(architecture):
+            from fastdeploy.input.multimodal.ernie_vl import ErnieVLProcessor
+            from fastdeploy.input.multimodal.image_processors.ernie import (
+                AdaptiveImageProcessor,
+            )
+
+            image_processor = AdaptiveImageProcessor.from_pretrained(self.model_name_or_path)
+            return ErnieVLProcessor(
+                tokenizer=self.processor.tokenizer,
+                image_processor=image_processor,
+                config=self.model_config,
+                processor_kwargs=self.mm_processor_kwargs,
+            )
+        elif "PaddleOCRVL" in architecture:
+            from fastdeploy.input.multimodal.image_processors.paddleocr import (
+                PaddleOCRImageProcessor,
+            )
+            from fastdeploy.input.multimodal.paddleocr_vl import PaddleOCRVLProcessor
+
+            image_processor = PaddleOCRImageProcessor.from_pretrained(self.model_name_or_path)
+            return PaddleOCRVLProcessor(
+                tokenizer=self.processor.tokenizer,
+                image_processor=image_processor,
+                config=self.model_config,
+                processor_kwargs=self.mm_processor_kwargs,
+            )
+        elif "Qwen3VL" in architecture:
+            from fastdeploy.input.multimodal.image_processors.qwen3 import (
+                Qwen3ImageProcessor,
+            )
+            from fastdeploy.input.multimodal.qwen3_vl import Qwen3VLProcessor
+
+            image_processor = Qwen3ImageProcessor.from_pretrained(self.model_name_or_path)
+            return Qwen3VLProcessor(
+                tokenizer=self.processor.tokenizer,
+                image_processor=image_processor,
+                config=self.model_config,
+                processor_kwargs=self.mm_processor_kwargs,
+            )
+        elif "Qwen2_5_VL" in architecture:
+            from fastdeploy.input.multimodal.image_processors.qwen import (
+                QwenImageProcessor,
+            )
+            from fastdeploy.input.multimodal.qwen_vl import QwenVLProcessor
+
+            image_processor = QwenImageProcessor.from_pretrained(self.model_name_or_path)
+            return QwenVLProcessor(
+                tokenizer=self.processor.tokenizer,
+                image_processor=image_processor,
+                config=self.model_config,
+                processor_kwargs=self.mm_processor_kwargs,
+            )
+        else:
+            raise ValueError(f"Unsupported model processor architecture: {architecture}. ")

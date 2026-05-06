@@ -33,7 +33,7 @@ from fastdeploy.config import FDConfig
 from fastdeploy.engine.pooling_params import PoolingParams
 from fastdeploy.engine.request import ImagePosition, Request, RequestType
 from fastdeploy.engine.tasks import PoolingTask
-from fastdeploy.input.image_processors.adaptive_processor import AdaptiveImageProcessor
+from fastdeploy.input.multimodal.image_processors.ernie import AdaptiveImageProcessor
 from fastdeploy.inter_communicator import IPCSignal, ZmqIpcClient
 from fastdeploy.model_executor.forward_meta import ForwardMeta
 from fastdeploy.model_executor.graph_optimization.utils import (

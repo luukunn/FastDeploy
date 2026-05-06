@@ -95,7 +95,7 @@ import zmq
 from fastdeploy import envs
 from fastdeploy.cache_manager.v1 import CacheController
 from fastdeploy.engine.tasks import PoolingTask
-from fastdeploy.input.image_processors.adaptive_processor import AdaptiveImageProcessor
+from fastdeploy.input.multimodal.image_processors.ernie import AdaptiveImageProcessor
 from fastdeploy.inter_communicator import IPCSignal, ZmqIpcClient
 from fastdeploy.logger.deterministic_logger import DeterministicLogger
 from fastdeploy.model_executor.forward_meta import ForwardMeta

@@ -20,19 +20,19 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from fastdeploy.input.image_processors.adaptive_processor import (
+from fastdeploy.input.multimodal.image_processors.ernie import (
     AdaptiveImageProcessor,
     make_batched_images,
     make_batched_videos,
 )
-from fastdeploy.input.image_processors.common import (
+from fastdeploy.input.multimodal.common import (
     ceil_by_factor,
     floor_by_factor,
     is_scaled_image,
     round_by_factor,
     smart_resize_paddleocr,
 )
-from fastdeploy.input.image_processors.common import smart_resize_qwen as smart_resize
+from fastdeploy.input.multimodal.common import smart_resize_qwen as smart_resize
 
 
 class TestImagePreprocessorAdaptive(unittest.TestCase):
@@ -546,7 +546,7 @@ class TestPaddleOCRImageProcessor(unittest.TestCase):
     """Tests for PaddleOCR-specific ImageProcessor."""
 
     def setUp(self):
-        from fastdeploy.input.image_processors.paddleocr_processor import ImageProcessor
+        from fastdeploy.input.multimodal.image_processors.paddleocr import PaddleOCRImageProcessor as ImageProcessor
 
         self.ImageProcessor = ImageProcessor
         self.default_params = {
