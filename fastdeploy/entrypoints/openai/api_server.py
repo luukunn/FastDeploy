@@ -40,6 +40,13 @@ from fastdeploy.engine.async_llm import AsyncLLM
 from fastdeploy.engine.engine import LLMEngine
 from fastdeploy.engine.expert_service import ExpertService
 from fastdeploy.engine.request import ControlRequest
+from fastdeploy.entrypoints.anthropic.protocol import (
+    AnthropicError,
+    AnthropicErrorResponse,
+    AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
+)
+from fastdeploy.entrypoints.anthropic.serving import AnthropicServingMessages
 from fastdeploy.entrypoints.chat_utils import load_chat_template
 from fastdeploy.entrypoints.engine_client import EngineClient
 from fastdeploy.entrypoints.openai.middleware import AuthenticationMiddleware
@@ -291,6 +298,7 @@ async def lifespan(app: FastAPI):
     app.state.completion_handler = completion_handler
     app.state.embedding_handler = embedding_handler
     app.state.reward_handler = reward_handler
+    app.state.anthropic_handler = AnthropicServingMessages(chat_handler)
     app.state.event_loop = asyncio.get_running_loop()
 
     if llm_engine is not None and not isinstance(llm_engine, AsyncLLM):
@@ -587,6 +595,47 @@ async def create_chat_completion(request: ChatCompletionRequest, req: Request):
             error=str(e),
         )
         return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
+
+
+@app.post("/v1/messages")
+@with_cancellation
+async def create_messages(request: AnthropicMessagesRequest, req: Request):
+    """
+    Create a message using the Anthropic Messages API format.
+    """
+    log_request(
+        RequestLogLevel.FULL, message="Anthropic Messages request: {request}", request=request.model_dump_json()
+    )
+    if app.state.dynamic_load_weight:
+        status, msg = app.state.engine_client.is_workers_alive()
+        if not status:
+            return JSONResponse(content={"error": "Worker Service Not Healthy"}, status_code=304)
+    try:
+        async with connection_manager():
+            generator = await app.state.anthropic_handler.create_messages(request)
+            if isinstance(generator, ErrorResponse):
+                api_server_logger.debug(f"release: {connection_semaphore.status()}")
+                connection_semaphore.release()
+                error_resp = AnthropicErrorResponse(
+                    error=AnthropicError(type="internal_error", message=generator.error.message)
+                )
+                return JSONResponse(content=error_resp.model_dump(), status_code=500)
+            elif isinstance(generator, AnthropicMessagesResponse):
+                api_server_logger.debug(f"release: {connection_semaphore.status()}")
+                connection_semaphore.release()
+                return JSONResponse(content=generator.model_dump(exclude_none=True))
+            else:
+                wrapped_generator = wrap_streaming_generator(generator)
+                return StreamingResponse(content=wrapped_generator(), media_type="text/event-stream")
+
+    except HTTPException as e:
+        log_request_error(
+            message="request[{request_id}] Error in Anthropic messages: {error}",
+            request_id=None,
+            error=str(e),
+        )
+        error_resp = AnthropicErrorResponse(error=AnthropicError(type="api_error", message=e.detail))
+        return JSONResponse(status_code=e.status_code, content=error_resp.model_dump())
 
 
 @app.post("/v1/completions")
