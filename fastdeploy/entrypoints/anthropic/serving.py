@@ -21,7 +21,6 @@ delegates to the existing inference pipeline, and converts responses back.
 """
 
 import json
-import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -45,8 +44,11 @@ from fastdeploy.entrypoints.openai.protocol import (
     FunctionDefinition,
     StreamOptions,
 )
-
-logger = logging.getLogger(__name__)
+from fastdeploy.logger.request_logger import (
+    RequestLogLevel,
+    log_request,
+    log_request_error,
+)
 
 
 def wrap_data_with_event(data: str, event: str) -> str:
@@ -84,14 +86,12 @@ class AnthropicServingMessages:
         self, request: AnthropicMessagesRequest
     ) -> Union[AsyncGenerator[str, None], AnthropicMessagesResponse, ErrorResponse]:
         """Handle an Anthropic Messages API request."""
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Anthropic request: %s", request.model_dump_json())
+        log_request(RequestLogLevel.FULL, message="Anthropic request: {request}", request=request.model_dump_json())
 
         # 1. Convert request
         chat_req = self._convert_request(request)
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Adapted to OpenAI: %s", chat_req.model_dump_json())
+        log_request(RequestLogLevel.FULL, message="Adapted to OpenAI: {request}", request=chat_req.model_dump_json())
 
         # 2. Delegate to inference engine
         result = await self.chat_handler.create_chat_completion(chat_req)
@@ -151,8 +151,16 @@ class AnthropicServingMessages:
             if isinstance(request.system, str):
                 messages.append({"role": "system", "content": request.system})
             else:
-                parts = [b.text for b in request.system if b.type == "text" and b.text]
-                messages.append({"role": "system", "content": "".join(parts)})
+                system_prompt = ""
+                for block in request.system:
+                    if block.type == "text" and block.text:
+                        # Strip Claude Code's attribution header which contains
+                        # a per-request hash that defeats prefix caching.
+                        if block.text.startswith("x-anthropic-billing-header"):
+                            continue
+                        system_prompt += block.text
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
 
         # Conversation messages
         for msg in request.messages:
@@ -433,6 +441,8 @@ class AnthropicServingMessages:
                         type="message_start",
                         message=AnthropicMessagesResponse(
                             id=openai_chunk.id,
+                            type="message",
+                            role="assistant",
                             content=[],
                             model=openai_chunk.model,
                             stop_reason=None,
@@ -525,7 +535,7 @@ class AnthropicServingMessages:
                                 yield wrap_data_with_event(data, "content_block_delta")
 
         except Exception as e:
-            logger.exception("Error in Anthropic stream conversion.")
+            log_request_error(message=f"Error in Anthropic stream conversion: {e}")
             error_event = AnthropicStreamEvent(
                 type="error",
                 error=AnthropicError(type="internal_error", message=str(e)),

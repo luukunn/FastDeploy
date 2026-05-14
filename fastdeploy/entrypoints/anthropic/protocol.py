@@ -46,7 +46,15 @@ class AnthropicContentBlock(BaseModel):
     text, image, tool_use, tool_result, thinking, redacted_thinking.
     """
 
-    type: str
+    type: Literal[
+        "text",
+        "image",
+        "tool_use",
+        "tool_result",
+        "tool_reference",
+        "thinking",
+        "redacted_thinking",
+    ]
     # text type
     text: Optional[str] = None
     # image type
