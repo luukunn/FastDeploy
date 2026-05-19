@@ -331,7 +331,7 @@ class TestQwenPromptTokenIds2Outputs(unittest.TestCase):
 
 class TestQwenLoadVideo(unittest.TestCase):
     @patch("fastdeploy.input.multimodal.qwen_vl._sample_qwen")
-    @patch("fastdeploy.input.multimodal.qwen_vl.read_video_decord")
+    @patch("fastdeploy.input.multimodal.qwen_vl.read_video_paddlecodec")
     def test_basic_load(self, mock_read, mock_sample):
         proc = _make_qwen_processor()
 

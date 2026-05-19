@@ -264,7 +264,7 @@ class TestPaddleOCRPreprocessVideo(unittest.TestCase):
 
 class TestPaddleOCRLoadVideo(unittest.TestCase):
     @patch("fastdeploy.input.multimodal.paddleocr_vl._sample_paddleocr")
-    @patch("fastdeploy.input.multimodal.paddleocr_vl.read_video_decord")
+    @patch("fastdeploy.input.multimodal.paddleocr_vl.read_video_paddlecodec")
     def test_basic_load(self, mock_read, mock_sample):
         proc = _make_paddleocr_processor()
 
@@ -281,7 +281,7 @@ class TestPaddleOCRLoadVideo(unittest.TestCase):
         mock_read.assert_called_once()
 
     @patch("fastdeploy.input.multimodal.paddleocr_vl._sample_paddleocr")
-    @patch("fastdeploy.input.multimodal.paddleocr_vl.read_video_decord")
+    @patch("fastdeploy.input.multimodal.paddleocr_vl.read_video_paddlecodec")
     def test_uses_paddleocr_sampler(self, mock_read, mock_sample):
         """Should use sample_frames_paddleocr, not _sample_qwen."""
         proc = _make_paddleocr_processor()
@@ -301,7 +301,7 @@ class TestPaddleOCRLoadVideo(unittest.TestCase):
         self.assertEqual(call_kwargs["frame_factor"], proc.temporal_conv_size)
 
     @patch("fastdeploy.input.multimodal.paddleocr_vl._sample_paddleocr")
-    @patch("fastdeploy.input.multimodal.paddleocr_vl.read_video_decord")
+    @patch("fastdeploy.input.multimodal.paddleocr_vl.read_video_paddlecodec")
     def test_no_sampling_when_fps_negative(self, mock_read, mock_sample):
         """When fps <= 0 and target_frames <= 0, no sampling is performed."""
         proc = _make_paddleocr_processor(fps=-1.0, target_frames=-1)

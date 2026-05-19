@@ -24,7 +24,7 @@ from fastdeploy.engine.request import ImagePosition
 from fastdeploy.input.multimodal.image_processors import QwenImageProcessor
 from fastdeploy.input.multimodal.mm_processor import MMProcessor
 from fastdeploy.input.utils import IDS_TYPE_FLAG
-from fastdeploy.input.utils.video import read_video_decord
+from fastdeploy.input.utils.video import read_video_paddlecodec
 from fastdeploy.input.utils.video import sample_frames_qwen as _sample_qwen
 
 
@@ -185,7 +185,7 @@ class QwenVLProcessor(MMProcessor):
         outputs["fps"].append(fps)
 
     def load_video(self, url, item):
-        reader, meta, _ = read_video_decord(url, save_to_disk=False)
+        reader, meta, _ = read_video_paddlecodec(url, save_to_disk=False)
 
         fps = item.get("fps", self.fps)
         num_frames = item.get("target_frames", self.target_frames)

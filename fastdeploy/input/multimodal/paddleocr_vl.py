@@ -21,7 +21,7 @@ from fastdeploy.engine.request import ImagePosition
 from fastdeploy.input.multimodal.image_processors import PaddleOCRImageProcessor
 from fastdeploy.input.multimodal.qwen_vl import QwenVLProcessor
 from fastdeploy.input.utils import IDS_TYPE_FLAG
-from fastdeploy.input.utils.video import read_video_decord
+from fastdeploy.input.utils.video import read_video_paddlecodec
 from fastdeploy.input.utils.video import sample_frames_paddleocr as _sample_paddleocr
 
 
@@ -188,7 +188,7 @@ class PaddleOCRVLProcessor(QwenVLProcessor):
     # ------------------------------------------------------------------
 
     def load_video(self, url, item):
-        reader, meta, _ = read_video_decord(url, save_to_disk=False)
+        reader, meta, _ = read_video_paddlecodec(url, save_to_disk=False)
 
         fps = item.get("fps", self.fps)
         num_frames = item.get("target_frames", self.target_frames)
